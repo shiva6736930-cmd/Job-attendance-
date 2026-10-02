@@ -1,0 +1,716 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  Users,
+  Plus,
+  Download,
+  Upload,
+  RotateCcw,
+  CheckCircle,
+  Database,
+  UserPlus,
+  Trash2,
+} from 'lucide-react';
+import { Employee, AttendanceRecord } from './types/attendance';
+import {
+  loadEmployees,
+  saveEmployees,
+  loadAttendance,
+  saveAttendance,
+  calculateSummary,
+  exportToCSV,
+  exportBackupJSON,
+  deduplicateAttendance,
+} from './utils/storage';
+import { Header } from './components/Header';
+import { SummaryCards } from './components/SummaryCards';
+import { AttendanceTable } from './components/AttendanceTable';
+import { AttendanceFormModal } from './components/AttendanceFormModal';
+import { EmployeeManagerModal } from './components/EmployeeManagerModal';
+import { MonthlyReportView } from './components/MonthlyReportView';
+import { RulesInfoModal } from './components/RulesInfoModal';
+import { FirebaseStatusModal } from './components/FirebaseStatusModal';
+import {
+  testFirestoreConnection,
+  syncEmployeeToCloud,
+  deleteEmployeeFromCloud,
+  syncAttendanceToCloud,
+  deleteAttendanceFromCloud,
+  subscribeCloudEmployees,
+  subscribeCloudAttendance,
+  auth,
+  db,
+} from './firebase/firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { collection, getDocs } from 'firebase/firestore';
+
+export default function App() {
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
+
+  // Navigation & Filter state
+  const [activeTab, setActiveTab] = useState<'attendance' | 'summary' | 'employees'>('attendance');
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('all');
+
+  // Default to current year-month e.g. 2026-10
+  const currentMonthStr = useMemo(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  }, []);
+  const [selectedMonth, setSelectedMonth] = useState<string>(currentMonthStr);
+
+  // Modals state
+  const [isAttendanceModalOpen, setIsAttendanceModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<AttendanceRecord | null>(null);
+  const [isEmployeeModalOpen, setIsEmployeeModalOpen] = useState(false);
+  const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
+  const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
+
+  // Firebase connection & sync state
+  const [isFirebaseConnected, setIsFirebaseConnected] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+
+  // Toast / feedback message
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Initialize data from local storage first (only real user data)
+  useEffect(() => {
+    const emps = loadEmployees();
+    setEmployees(emps);
+    const recs = loadAttendance();
+    setAttendance(recs);
+
+    // Test Firebase connection
+    testFirestoreConnection().then((res) => {
+      setIsFirebaseConnected(res.connected);
+      if (!res.connected) {
+        setCloudSyncError('Client is offline or network restricted');
+      }
+    });
+
+    // Listen to Firebase Auth state
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+    });
+
+    // Subscribe to cloud employees (filter out any old legacy mock IDs)
+    const unsubEmps = subscribeCloudEmployees(
+      (cloudEmps) => {
+        const clean = (cloudEmps || []).filter(
+          (e) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(e.id)
+        );
+        if (clean.length > 0) {
+          setEmployees(clean);
+          saveEmployees(clean);
+        }
+      },
+      (err: any) => {
+        console.warn('Cloud employee sync note:', err?.message || err);
+      }
+    );
+
+    // Subscribe to cloud attendance (filter out legacy mock records)
+    const unsubAtt = subscribeCloudAttendance(
+      (cloudAtt) => {
+        const clean = (cloudAtt || []).filter(
+          (r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId)
+        );
+        if (clean.length > 0) {
+          setAttendance(clean);
+          saveAttendance(clean);
+        }
+      },
+      (err: any) => {
+        console.warn('Cloud attendance sync note:', err?.message || err);
+      }
+    );
+
+    return () => {
+      unsubAuth();
+      unsubEmps();
+      unsubAtt();
+    };
+  }, []);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((prev) => (prev === msg ? null : prev));
+    }, 3200);
+  };
+
+  // Employees Map for quick name lookup
+  const employeesMap = useMemo(() => {
+    return new Map(employees.map((e) => [e.id, e]));
+  }, [employees]);
+
+  // Filtered attendance by Employee and Month
+  const filteredAttendance = useMemo(() => {
+    return attendance.filter((rec) => {
+      const matchEmp = selectedEmployeeId === 'all' || rec.employeeId === selectedEmployeeId;
+      const matchMonth = selectedMonth === 'all' || rec.date.startsWith(selectedMonth);
+      return matchEmp && matchMonth;
+    });
+  }, [attendance, selectedEmployeeId, selectedMonth]);
+
+  // Calculated summary based on active filters
+  const summary = useMemo(() => {
+    return calculateSummary(filteredAttendance);
+  }, [filteredAttendance]);
+
+  // Filter label for headers
+  const filterLabel = useMemo(() => {
+    const empName =
+      selectedEmployeeId === 'all'
+        ? 'All Employees'
+        : employeesMap.get(selectedEmployeeId)?.name || 'Selected Employee';
+
+    let monthName = 'All Time';
+    if (selectedMonth !== 'all') {
+      const parts = selectedMonth.split('-').map(Number);
+      if (parts.length === 2) {
+        const d = new Date(parts[0], parts[1] - 1, 1);
+        monthName = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      }
+    }
+
+    return `${empName} · ${monthName}`;
+  }, [selectedEmployeeId, selectedMonth, employeesMap]);
+
+  // Handlers for Attendance
+  const handleOpenNewAttendance = () => {
+    if (employees.length === 0) {
+      showToast('Pehle koi employee add karein.');
+      setIsEmployeeModalOpen(true);
+      return;
+    }
+    setEditingRecord(null);
+    setIsAttendanceModalOpen(true);
+  };
+
+  const handleEditRecord = (record: AttendanceRecord) => {
+    setEditingRecord(record);
+    setIsAttendanceModalOpen(true);
+  };
+
+  const handleDeleteRecord = (id: string) => {
+    if (window.confirm('Delete this attendance entry?')) {
+      const updated = attendance.filter((r) => r.id !== id);
+      setAttendance(updated);
+      saveAttendance(updated);
+      deleteAttendanceFromCloud(id).catch((err) => {
+        console.warn('Firebase sync delete note:', err);
+      });
+      showToast('Attendance record deleted.');
+    }
+  };
+
+  const handleSaveAttendance = (
+    data: Omit<AttendanceRecord, 'id' | 'createdAt' | 'updatedAt'>,
+    recordId?: string
+  ) => {
+    let updated: AttendanceRecord[];
+    let savedRecord: AttendanceRecord;
+
+    if (recordId) {
+      // Edit existing by ID
+      const existing = attendance.find((r) => r.id === recordId);
+      savedRecord = {
+        ...data,
+        id: recordId,
+        createdAt: existing?.createdAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+      updated = attendance.map((r) => (r.id === recordId ? savedRecord : r));
+      showToast('Attendance updated & synced.');
+    } else {
+      // Check if this employee already has an entry on this date
+      const existingIndex = attendance.findIndex(
+        (r) => r.employeeId === data.employeeId && r.date === data.date
+      );
+
+      if (existingIndex >= 0) {
+        // Update existing record for this date instead of duplicate!
+        const existing = attendance[existingIndex];
+        savedRecord = {
+          ...data,
+          id: existing.id,
+          createdAt: existing.createdAt || Date.now(),
+          updatedAt: Date.now(),
+        };
+        updated = [...attendance];
+        updated[existingIndex] = savedRecord;
+        showToast('Shift for this date updated & synced.');
+      } else {
+        savedRecord = {
+          ...data,
+          id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        updated = [savedRecord, ...attendance];
+        showToast('Attendance saved & synced.');
+      }
+    }
+
+    const cleanUpdated = deduplicateAttendance(updated);
+    setAttendance(cleanUpdated);
+    saveAttendance(cleanUpdated);
+
+    // Sync with Firebase in background
+    syncAttendanceToCloud(savedRecord).catch((err) => {
+      console.warn('Firebase attendance save error:', err);
+    });
+  };
+
+  // Handlers for Employee Management
+  const handleAddEmployee = (empData: Omit<Employee, 'id' | 'createdAt'>) => {
+    const newEmp: Employee = {
+      ...empData,
+      id: `emp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      createdAt: new Date().toISOString(),
+    };
+    const updated = [...employees, newEmp];
+    setEmployees(updated);
+    saveEmployees(updated);
+    syncEmployeeToCloud(newEmp).catch((err) => {
+      console.warn('Firebase employee sync error:', err);
+    });
+    showToast(`Added: ${newEmp.name}`);
+  };
+
+  const handleUpdateEmployee = (updatedEmp: Employee) => {
+    const updated = employees.map((e) => (e.id === updatedEmp.id ? updatedEmp : e));
+    setEmployees(updated);
+    saveEmployees(updated);
+    syncEmployeeToCloud(updatedEmp).catch((err) => {
+      console.warn('Firebase employee sync error:', err);
+    });
+    showToast(`Updated: ${updatedEmp.name}`);
+  };
+
+  const handleDeleteEmployee = (id: string) => {
+    const updatedEmps = employees.filter((e) => e.id !== id);
+    const updatedAtt = attendance.filter((r) => r.employeeId !== id);
+    setEmployees(updatedEmps);
+    saveEmployees(updatedEmps);
+    setAttendance(updatedAtt);
+    saveAttendance(updatedAtt);
+
+    deleteEmployeeFromCloud(id).catch((err) => {
+      console.warn('Firebase delete employee error:', err);
+    });
+
+    if (selectedEmployeeId === id) {
+      setSelectedEmployeeId('all');
+    }
+    showToast('Employee removed.');
+  };
+
+  // Cloud Sync Handlers
+  const handleForceSyncToCloud = async () => {
+    setIsSyncing(true);
+    setCloudSyncError(null);
+    try {
+      for (const emp of employees) {
+        await syncEmployeeToCloud(emp);
+      }
+      for (const rec of attendance) {
+        await syncAttendanceToCloud(rec);
+      }
+      showToast('All local records pushed to Firebase!');
+    } catch (err: any) {
+      console.error('Push to cloud error:', err);
+      setCloudSyncError(err?.message || 'Permission denied or Firestore not enabled');
+      throw err;
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handlePullFromCloud = async () => {
+    setIsSyncing(true);
+    setCloudSyncError(null);
+    try {
+      const empSnap = await getDocs(collection(db, 'employees'));
+      const cloudEmps: Employee[] = [];
+      empSnap.forEach((d) => {
+        const item = d.data() as Employee;
+        if (!['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(item.id)) {
+          cloudEmps.push(item);
+        }
+      });
+
+      const attSnap = await getDocs(collection(db, 'attendance'));
+      const cloudAtt: AttendanceRecord[] = [];
+      attSnap.forEach((d) => {
+        const item = d.data() as AttendanceRecord;
+        if (!['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(item.employeeId)) {
+          cloudAtt.push(item);
+        }
+      });
+
+      if (cloudEmps.length > 0) {
+        setEmployees(cloudEmps);
+        saveEmployees(cloudEmps);
+      }
+      if (cloudAtt.length > 0) {
+        setAttendance(cloudAtt);
+        saveAttendance(cloudAtt);
+      }
+      showToast(`Pulled ${cloudEmps.length} employees & ${cloudAtt.length} shifts from Firebase.`);
+    } catch (err: any) {
+      console.error('Pull from cloud error:', err);
+      setCloudSyncError(err?.message || 'Check Firestore rules');
+      throw err;
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Export handlers
+  const handleExportCSV = () => {
+    exportToCSV(filteredAttendance, employeesMap, filterLabel);
+    showToast('CSV export downloaded.');
+  };
+
+  const handleExportJSON = () => {
+    exportBackupJSON(employees, attendance);
+    showToast('JSON backup file saved.');
+  };
+
+  const handleImportJSONClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const parsed = JSON.parse(content);
+        if (parsed && Array.isArray(parsed.employees) && Array.isArray(parsed.attendance)) {
+          setEmployees(parsed.employees);
+          saveEmployees(parsed.employees);
+          setAttendance(parsed.attendance);
+          saveAttendance(parsed.attendance);
+          showToast(`Restored ${parsed.employees.length} employees & ${parsed.attendance.length} shifts.`);
+          parsed.employees.forEach((emp: Employee) => syncEmployeeToCloud(emp));
+          parsed.attendance.forEach((rec: AttendanceRecord) => syncAttendanceToCloud(rec));
+        } else {
+          alert('Invalid backup file.');
+        }
+      } catch (err) {
+        alert('Could not parse backup file.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleClearAllData = () => {
+    if (window.confirm('Kya aap sachme saara employee aur attendance data delete karna chahte hain?')) {
+      setEmployees([]);
+      saveEmployees([]);
+      setAttendance([]);
+      saveAttendance([]);
+      setSelectedEmployeeId('all');
+      showToast('Saara data delete ho gaya.');
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
+      {/* Hidden file input for JSON import */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        accept=".json"
+        className="hidden"
+      />
+
+      {/* Main App Navigation Header */}
+      <Header
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        selectedEmployeeId={selectedEmployeeId}
+        setSelectedEmployeeId={setSelectedEmployeeId}
+        selectedMonth={selectedMonth}
+        setSelectedMonth={setSelectedMonth}
+        employees={employees}
+        onOpenNewRecord={handleOpenNewAttendance}
+        onOpenRules={() => setIsRulesModalOpen(true)}
+        onOpenFirebaseStatus={() => setIsFirebaseModalOpen(true)}
+        onOpenAddEmployee={() => setIsEmployeeModalOpen(true)}
+        isFirebaseConnected={isFirebaseConnected}
+      />
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-xl shadow-lg border border-slate-700 text-xs font-medium flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6">
+        {/* Onboarding State if no employees yet */}
+        {employees.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-14 text-center max-w-md mx-auto my-8 shadow-xs space-y-4">
+            <div className="w-14 h-14 bg-slate-900 text-white rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+              <UserPlus className="w-7 h-7" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-base sm:text-lg font-bold text-slate-900">
+                Koi Employee Add Nahi Hai
+              </h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Pehle apna employee add karein. Uske baad aap unka daily clock-in / clock-out attendance record kar sakenge.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsEmployeeModalOpen(true)}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white text-xs sm:text-sm font-bold rounded-xl shadow-xs transition cursor-pointer"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>+ Add First Employee</span>
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* VIEW 1: Attendance Log (Default) */}
+            {activeTab === 'attendance' && (
+              <div>
+                {/* Top Dashboard Summary Cards */}
+                <SummaryCards summary={summary} filterLabel={filterLabel} />
+
+                {/* Attendance Data Table */}
+                <AttendanceTable
+                  records={filteredAttendance}
+                  employees={employees}
+                  onEdit={handleEditRecord}
+                  onDelete={handleDeleteRecord}
+                  onExportCSV={handleExportCSV}
+                />
+              </div>
+            )}
+
+            {/* VIEW 2: Monthly Summary & Timesheet Statement */}
+            {activeTab === 'summary' && (
+              <MonthlyReportView
+                records={filteredAttendance}
+                employees={employees}
+                selectedEmployeeId={selectedEmployeeId}
+                selectedMonth={selectedMonth}
+                onExportCSV={handleExportCSV}
+              />
+            )}
+
+            {/* VIEW 3: Employees Management */}
+            {activeTab === 'employees' && (
+              <div className="space-y-4">
+                <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex items-center justify-between shadow-xs">
+                  <div>
+                    <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
+                      <Users className="w-5 h-5 text-slate-700" />
+                      <span>Employee List ({employees.length})</span>
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Aapke dwara add kiye gaye sabhi workers ki list.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsEmployeeModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition shadow-2xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Employee</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                  {employees.map((emp) => {
+                    const empRecords = attendance.filter((r) => r.employeeId === emp.id);
+                    const totalBasic = empRecords.reduce((acc, r) => acc + r.basicHours, 0);
+                    const totalOt = empRecords.reduce((acc, r) => acc + r.otHours, 0);
+
+                    return (
+                      <div
+                        key={emp.id}
+                        className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2.5 mb-3">
+                            <div
+                              className={`w-9 h-9 rounded-xl text-white flex items-center justify-center font-bold text-xs shrink-0 ${
+                                emp.avatarColor || 'bg-slate-700'
+                              }`}
+                            >
+                              {emp.name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <h3 className="text-sm font-bold text-slate-900 leading-tight truncate">
+                                {emp.name}
+                              </h3>
+                              <span className="text-xs text-slate-500">{emp.role}</span>
+                            </div>
+                          </div>
+
+                          <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 space-y-1 text-xs font-mono">
+                            <div className="flex items-center justify-between text-slate-600">
+                              <span>Shifts:</span>
+                              <span className="font-semibold text-slate-900">{empRecords.length}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-slate-600">
+                              <span>Basic Hours:</span>
+                              <span className="font-semibold text-slate-900">{totalBasic.toFixed(1)}h</span>
+                            </div>
+                            <div className="flex items-center justify-between text-amber-900">
+                              <span>Overtime:</span>
+                              <span className="font-bold">+{totalOt.toFixed(1)}h</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pt-3 mt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedEmployeeId(emp.id);
+                              setActiveTab('attendance');
+                            }}
+                            className="text-xs font-semibold text-slate-700 hover:text-slate-900 hover:underline"
+                          >
+                            View Shifts →
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsEmployeeModalOpen(true)}
+                            className="text-xs text-slate-500 hover:text-slate-800"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+
+      {/* Footer & Data Storage Bar */}
+      <footer className="mt-auto border-t border-slate-200 bg-white py-3.5 px-4 sm:px-6">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-slate-800">ShiftTrack</span>
+            <span>·</span>
+            <button
+              onClick={() => setIsFirebaseModalOpen(true)}
+              className="inline-flex items-center gap-1.5 font-medium text-amber-800 hover:text-amber-950 bg-amber-50 px-2 py-0.5 rounded border border-amber-200"
+            >
+              <Database className="w-3 h-3 text-amber-600" />
+              <span>Firebase: shiva-shoes-store</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            </button>
+            <span>·</span>
+            <span>{employees.length} employees · {attendance.length} records</span>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={handleExportJSON}
+              className="hover:text-slate-900 transition flex items-center gap-1 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-slate-400" />
+              <span>Backup</span>
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={handleImportJSONClick}
+              className="hover:text-slate-900 transition flex items-center gap-1 cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5 text-slate-400" />
+              <span>Restore</span>
+            </button>
+            {employees.length > 0 && (
+              <>
+                <span>·</span>
+                <button
+                  type="button"
+                  onClick={handleClearAllData}
+                  className="hover:text-red-600 transition flex items-center gap-1 cursor-pointer text-slate-400"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Clear All</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </footer>
+
+      {/* Modals */}
+      <AttendanceFormModal
+        isOpen={isAttendanceModalOpen}
+        onClose={() => {
+          setIsAttendanceModalOpen(false);
+          setEditingRecord(null);
+        }}
+        employees={employees}
+        initialRecord={editingRecord}
+        onSave={handleSaveAttendance}
+        defaultEmployeeId={selectedEmployeeId}
+        onOpenAddEmployee={() => setIsEmployeeModalOpen(true)}
+      />
+
+      <EmployeeManagerModal
+        isOpen={isEmployeeModalOpen}
+        onClose={() => setIsEmployeeModalOpen(false)}
+        employees={employees}
+        attendanceRecords={attendance}
+        onAddEmployee={handleAddEmployee}
+        onUpdateEmployee={handleUpdateEmployee}
+        onDeleteEmployee={handleDeleteEmployee}
+        onSelectEmployeeForFilter={(id) => setSelectedEmployeeId(id)}
+      />
+
+      <RulesInfoModal
+        isOpen={isRulesModalOpen}
+        onClose={() => setIsRulesModalOpen(false)}
+      />
+
+      <FirebaseStatusModal
+        isOpen={isFirebaseModalOpen}
+        onClose={() => setIsFirebaseModalOpen(false)}
+        isConnected={isFirebaseConnected}
+        isSyncing={isSyncing}
+        cloudSyncError={cloudSyncError}
+        employees={employees}
+        attendance={attendance}
+        currentUser={currentUser}
+        onForceSyncToCloud={handleForceSyncToCloud}
+        onPullFromCloud={handlePullFromCloud}
+      />
+    </div>
+  );
+}

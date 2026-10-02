@@ -1,0 +1,122 @@
+{
+  "entities": {
+    "Employee": {
+      "title": "Employee",
+      "description": "Team member or worker tracked for attendance",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the employee"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full name of employee"
+        },
+        "role": {
+          "type": "string",
+          "description": "Job designation or department"
+        },
+        "avatarColor": {
+          "type": "string",
+          "description": "Tailwind color class for avatar"
+        },
+        "hourlyRate": {
+          "type": "number",
+          "description": "Base hourly duty rate in USD"
+        },
+        "otHourlyRate": {
+          "type": "number",
+          "description": "Overtime hourly duty rate in USD"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["id", "name", "role"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily clock-in and clock-out shift record with overtime breakdown",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique ID for the attendance record"
+        },
+        "employeeId": {
+          "type": "string",
+          "description": "Reference ID of the employee"
+        },
+        "date": {
+          "type": "string",
+          "description": "Date of shift in YYYY-MM-DD"
+        },
+        "timeIn": {
+          "type": "string",
+          "description": "Time clock in HH:mm"
+        },
+        "timeOut": {
+          "type": "string",
+          "description": "Time clock out HH:mm"
+        },
+        "totalMinutes": {
+          "type": "number",
+          "description": "Total duration worked in minutes"
+        },
+        "basicMinutes": {
+          "type": "number",
+          "description": "Basic duty duration in minutes"
+        },
+        "otMinutes": {
+          "type": "number",
+          "description": "Overtime duration in minutes"
+        },
+        "basicHours": {
+          "type": "number",
+          "description": "Basic duty hours decimal"
+        },
+        "otHours": {
+          "type": "number",
+          "description": "Overtime hours decimal"
+        },
+        "isSunday": {
+          "type": "boolean",
+          "description": "Whether the shift occurred on a Sunday"
+        },
+        "isFullDayOt": {
+          "type": "boolean",
+          "description": "Whether the shift is marked as full day overtime or holiday"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional notes or work description"
+        },
+        "ruleExplanation": {
+          "type": "string",
+          "description": "Audit rationale explaining rule calculation"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Creation timestamp in epoch ms"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Update timestamp in epoch ms"
+        }
+      },
+      "required": ["id", "employeeId", "date", "timeIn", "timeOut", "totalMinutes", "basicHours", "otHours"]
+    }
+  },
+  "firestore": {
+    "/employees/{employeeId}": {
+      "schema": "Employee",
+      "description": "Stores company employees and workers"
+    },
+    "/attendance/{recordId}": {
+      "schema": "AttendanceRecord",
+      "description": "Stores daily shift attendance and overtime records"
+    }
+  }
+}

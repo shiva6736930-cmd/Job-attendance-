@@ -1,0 +1,6 @@
+{
+  "name": "ShiftTrack - Attendance & Overtime Manager",
+  "description": "Multi-employee attendance and automatic overtime tracking with standard shift buffer rules, Sunday overtime logic, and monthly payroll summaries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
