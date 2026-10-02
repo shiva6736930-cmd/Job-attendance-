@@ -4,8 +4,11 @@ export interface Employee {
   name: string;
   role: string;
   avatarColor: string;
-  hourlyRate?: number;
-  otHourlyRate?: number;
+  monthlyFixedSalary?: number; // Default: ₹16,000 / month
+  standardWorkingDays?: number; // Default: 26 working days (excluding 4 Sundays)
+  dailyRate?: number; // Default: ₹16,000 / 26 = ₹615.38 / day
+  otHourlyRate?: number; // Default: ₹110 / hour
+  hourlyRate?: number; // Optional legacy hourly rate
   createdAt: string;
 }
 
