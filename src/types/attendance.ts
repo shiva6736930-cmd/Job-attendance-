@@ -1,5 +1,6 @@
 export interface Employee {
   id: string;
+  userId?: string;
   name: string;
   role: string;
   avatarColor: string;
@@ -10,6 +11,7 @@ export interface Employee {
 
 export interface AttendanceRecord {
   id: string;
+  userId?: string;
   employeeId: string;
   date: string; // YYYY-MM-DD
   timeIn: string; // HH:mm

@@ -116,29 +116,41 @@ export async function testFirestoreConnection(): Promise<{ connected: boolean; e
 }
 
 /**
- * Sync helpers for Employees collection
+ * Sync helpers for Employees collection (per-user isolated)
  */
-export async function syncEmployeeToCloud(emp: Employee): Promise<void> {
-  const path = `employees/${emp.id}`;
+export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promise<void> {
+  const uid = userId || auth.currentUser?.uid;
+  const path = uid ? `users/${uid}/employees/${emp.id}` : `employees/${emp.id}`;
   try {
-    await setDoc(doc(db, 'employees', emp.id), emp);
+    if (uid) {
+      await setDoc(doc(db, 'users', uid, 'employees', emp.id), { ...emp, userId: uid });
+    } else {
+      await setDoc(doc(db, 'employees', emp.id), emp);
+    }
   } catch (error) {
     console.warn(`Firestore save error on ${path}, trying Realtime DB fallback:`, error);
     try {
-      await set(ref(rtdb, `employees/${emp.id}`), emp);
+      const rtdbPath = uid ? `users/${uid}/employees/${emp.id}` : `employees/${emp.id}`;
+      await set(ref(rtdb, rtdbPath), { ...emp, userId: uid });
     } catch (rtdbErr) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
   }
 }
 
-export async function deleteEmployeeFromCloud(id: string): Promise<void> {
-  const path = `employees/${id}`;
+export async function deleteEmployeeFromCloud(id: string, userId?: string): Promise<void> {
+  const uid = userId || auth.currentUser?.uid;
+  const path = uid ? `users/${uid}/employees/${id}` : `employees/${id}`;
   try {
-    await deleteDoc(doc(db, 'employees', id));
+    if (uid) {
+      await deleteDoc(doc(db, 'users', uid, 'employees', id));
+    } else {
+      await deleteDoc(doc(db, 'employees', id));
+    }
   } catch (error) {
     try {
-      await remove(ref(rtdb, `employees/${id}`));
+      const rtdbPath = uid ? `users/${uid}/employees/${id}` : `employees/${id}`;
+      await remove(ref(rtdb, rtdbPath));
     } catch (rtdbErr) {
       handleFirestoreError(error, OperationType.DELETE, path);
     }
@@ -146,29 +158,41 @@ export async function deleteEmployeeFromCloud(id: string): Promise<void> {
 }
 
 /**
- * Sync helpers for Attendance records
+ * Sync helpers for Attendance records (per-user isolated)
  */
-export async function syncAttendanceToCloud(record: AttendanceRecord): Promise<void> {
-  const path = `attendance/${record.id}`;
+export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: string): Promise<void> {
+  const uid = userId || auth.currentUser?.uid;
+  const path = uid ? `users/${uid}/attendance/${record.id}` : `attendance/${record.id}`;
   try {
-    await setDoc(doc(db, 'attendance', record.id), record);
+    if (uid) {
+      await setDoc(doc(db, 'users', uid, 'attendance', record.id), { ...record, userId: uid });
+    } else {
+      await setDoc(doc(db, 'attendance', record.id), record);
+    }
   } catch (error) {
     console.warn(`Firestore save error on ${path}, trying Realtime DB fallback:`, error);
     try {
-      await set(ref(rtdb, `attendance/${record.id}`), record);
+      const rtdbPath = uid ? `users/${uid}/attendance/${record.id}` : `attendance/${record.id}`;
+      await set(ref(rtdb, rtdbPath), { ...record, userId: uid });
     } catch (rtdbErr) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
   }
 }
 
-export async function deleteAttendanceFromCloud(id: string): Promise<void> {
-  const path = `attendance/${id}`;
+export async function deleteAttendanceFromCloud(id: string, userId?: string): Promise<void> {
+  const uid = userId || auth.currentUser?.uid;
+  const path = uid ? `users/${uid}/attendance/${id}` : `attendance/${id}`;
   try {
-    await deleteDoc(doc(db, 'attendance', id));
+    if (uid) {
+      await deleteDoc(doc(db, 'users', uid, 'attendance', id));
+    } else {
+      await deleteDoc(doc(db, 'attendance', id));
+    }
   } catch (error) {
     try {
-      await remove(ref(rtdb, `attendance/${id}`));
+      const rtdbPath = uid ? `users/${uid}/attendance/${id}` : `attendance/${id}`;
+      await remove(ref(rtdb, rtdbPath));
     } catch (rtdbErr) {
       handleFirestoreError(error, OperationType.DELETE, path);
     }
@@ -180,12 +204,14 @@ export async function deleteAttendanceFromCloud(id: string): Promise<void> {
  */
 export function subscribeCloudEmployees(
   onUpdate: (employees: Employee[]) => void,
-  onError: (err: unknown) => void
+  onError: (err: unknown) => void,
+  userId?: string
 ): () => void {
-  const path = 'employees';
+  const uid = userId || auth.currentUser?.uid;
+  const targetCol = uid ? collection(db, 'users', uid, 'employees') : collection(db, 'employees');
   try {
     const unsub = onSnapshot(
-      collection(db, path),
+      targetCol,
       (snapshot) => {
         const list: Employee[] = [];
         snapshot.forEach((d) => {
@@ -198,8 +224,8 @@ export function subscribeCloudEmployees(
       (error) => {
         console.warn('Firestore onSnapshot employees error, falling back to RTDB:', error);
         onError(error);
-        // Fallback to RTDB
-        const rtdbRef = ref(rtdb, 'employees');
+        const rtdbPath = uid ? `users/${uid}/employees` : 'employees';
+        const rtdbRef = ref(rtdb, rtdbPath);
         onValue(
           rtdbRef,
           (snap) => {
@@ -223,12 +249,14 @@ export function subscribeCloudEmployees(
 
 export function subscribeCloudAttendance(
   onUpdate: (records: AttendanceRecord[]) => void,
-  onError: (err: unknown) => void
+  onError: (err: unknown) => void,
+  userId?: string
 ): () => void {
-  const path = 'attendance';
+  const uid = userId || auth.currentUser?.uid;
+  const targetCol = uid ? collection(db, 'users', uid, 'attendance') : collection(db, 'attendance');
   try {
     const unsub = onSnapshot(
-      collection(db, path),
+      targetCol,
       (snapshot) => {
         const list: AttendanceRecord[] = [];
         snapshot.forEach((d) => {
@@ -241,8 +269,8 @@ export function subscribeCloudAttendance(
       (error) => {
         console.warn('Firestore onSnapshot attendance error, falling back to RTDB:', error);
         onError(error);
-        // Fallback to RTDB
-        const rtdbRef = ref(rtdb, 'attendance');
+        const rtdbPath = uid ? `users/${uid}/attendance` : 'attendance';
+        const rtdbRef = ref(rtdb, rtdbPath);
         onValue(
           rtdbRef,
           (snap) => {

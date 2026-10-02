@@ -1,7 +1,15 @@
 import { Employee, AttendanceRecord, AttendanceSummary } from '../types/attendance';
 
-const EMPLOYEES_STORAGE_KEY = 'shifttrack_employees_clean_v2';
-const ATTENDANCE_STORAGE_KEY = 'shifttrack_attendance_clean_v2';
+const BASE_EMPLOYEES_KEY = 'shifttrack_employees_clean_v2';
+const BASE_ATTENDANCE_KEY = 'shifttrack_attendance_clean_v2';
+
+function getEmpKey(userId?: string) {
+  return userId ? `${BASE_EMPLOYEES_KEY}_${userId}` : BASE_EMPLOYEES_KEY;
+}
+
+function getAttKey(userId?: string) {
+  return userId ? `${BASE_ATTENDANCE_KEY}_${userId}` : BASE_ATTENDANCE_KEY;
+}
 
 // Clear legacy dummy data keys if present
 if (typeof window !== 'undefined') {
@@ -15,9 +23,14 @@ if (typeof window !== 'undefined') {
 
 export const INITIAL_EMPLOYEES: Employee[] = [];
 
-export function loadEmployees(): Employee[] {
+export function loadEmployees(userId?: string): Employee[] {
   try {
-    const data = localStorage.getItem(EMPLOYEES_STORAGE_KEY);
+    const key = getEmpKey(userId);
+    let data = localStorage.getItem(key);
+    // If user-specific key is empty, check base key once
+    if (!data && userId) {
+      data = localStorage.getItem(BASE_EMPLOYEES_KEY);
+    }
     if (!data) return [];
     const parsed = JSON.parse(data);
     if (!Array.isArray(parsed)) return [];
@@ -29,9 +42,10 @@ export function loadEmployees(): Employee[] {
   }
 }
 
-export function saveEmployees(employees: Employee[]): void {
+export function saveEmployees(employees: Employee[], userId?: string): void {
   try {
-    localStorage.setItem(EMPLOYEES_STORAGE_KEY, JSON.stringify(employees));
+    const key = getEmpKey(userId);
+    localStorage.setItem(key, JSON.stringify(employees));
   } catch (e) {
     console.error('Error saving employees', e);
   }
@@ -49,9 +63,13 @@ export function deduplicateAttendance(records: AttendanceRecord[]): AttendanceRe
   return Array.from(map.values());
 }
 
-export function loadAttendance(): AttendanceRecord[] {
+export function loadAttendance(userId?: string): AttendanceRecord[] {
   try {
-    const data = localStorage.getItem(ATTENDANCE_STORAGE_KEY);
+    const key = getAttKey(userId);
+    let data = localStorage.getItem(key);
+    if (!data && userId) {
+      data = localStorage.getItem(BASE_ATTENDANCE_KEY);
+    }
     if (!data) return [];
     const parsed = JSON.parse(data);
     if (!Array.isArray(parsed)) return [];
@@ -59,7 +77,7 @@ export function loadAttendance(): AttendanceRecord[] {
     const filtered = parsed.filter((r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId));
     const deduped = deduplicateAttendance(filtered);
     if (deduped.length !== parsed.length) {
-      saveAttendance(deduped);
+      saveAttendance(deduped, userId);
     }
     return deduped;
   } catch (e) {
@@ -68,9 +86,10 @@ export function loadAttendance(): AttendanceRecord[] {
   }
 }
 
-export function saveAttendance(records: AttendanceRecord[]): void {
+export function saveAttendance(records: AttendanceRecord[], userId?: string): void {
   try {
-    localStorage.setItem(ATTENDANCE_STORAGE_KEY, JSON.stringify(records));
+    const key = getAttKey(userId);
+    localStorage.setItem(key, JSON.stringify(records));
   } catch (e) {
     console.error('Error saving attendance', e);
   }

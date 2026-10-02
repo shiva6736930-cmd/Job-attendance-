@@ -9,7 +9,6 @@ import {
   Plus,
   Download,
   Upload,
-  RotateCcw,
   CheckCircle,
   Database,
   UserPlus,
@@ -34,6 +33,7 @@ import { EmployeeManagerModal } from './components/EmployeeManagerModal';
 import { MonthlyReportView } from './components/MonthlyReportView';
 import { RulesInfoModal } from './components/RulesInfoModal';
 import { FirebaseStatusModal } from './components/FirebaseStatusModal';
+import { LoginScreen } from './components/LoginScreen';
 import {
   testFirestoreConnection,
   syncEmployeeToCloud,
@@ -43,12 +43,16 @@ import {
   subscribeCloudEmployees,
   subscribeCloudAttendance,
   auth,
+  signOutFirebase,
   db,
 } from './firebase/firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { collection, getDocs } from 'firebase/firestore';
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
 
@@ -74,18 +78,17 @@ export default function App() {
   const [isFirebaseConnected, setIsFirebaseConnected] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   // Toast / feedback message
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize data from local storage first (only real user data)
+  // Listen to Firebase Auth state
   useEffect(() => {
-    const emps = loadEmployees();
-    setEmployees(emps);
-    const recs = loadAttendance();
-    setAttendance(recs);
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setAuthChecked(true);
+    });
 
     // Test Firebase connection
     testFirestoreConnection().then((res) => {
@@ -95,12 +98,26 @@ export default function App() {
       }
     });
 
-    // Listen to Firebase Auth state
-    const unsubAuth = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-    });
+    return () => unsubAuth();
+  }, []);
 
-    // Subscribe to cloud employees (filter out any old legacy mock IDs)
+  // When currentUser changes, load and subscribe to their isolated data
+  useEffect(() => {
+    if (!currentUser) {
+      setEmployees([]);
+      setAttendance([]);
+      return;
+    }
+
+    const uid = currentUser.uid;
+
+    // Load local storage for this specific user
+    const emps = loadEmployees(uid);
+    setEmployees(emps);
+    const recs = loadAttendance(uid);
+    setAttendance(recs);
+
+    // Subscribe to cloud employees for this user
     const unsubEmps = subscribeCloudEmployees(
       (cloudEmps) => {
         const clean = (cloudEmps || []).filter(
@@ -108,42 +125,53 @@ export default function App() {
         );
         if (clean.length > 0) {
           setEmployees(clean);
-          saveEmployees(clean);
+          saveEmployees(clean, uid);
         }
       },
       (err: any) => {
         console.warn('Cloud employee sync note:', err?.message || err);
-      }
+      },
+      uid
     );
 
-    // Subscribe to cloud attendance (filter out legacy mock records)
+    // Subscribe to cloud attendance for this user
     const unsubAtt = subscribeCloudAttendance(
       (cloudAtt) => {
         const clean = (cloudAtt || []).filter(
           (r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId)
         );
         if (clean.length > 0) {
-          setAttendance(clean);
-          saveAttendance(clean);
+          const deduped = deduplicateAttendance(clean);
+          setAttendance(deduped);
+          saveAttendance(deduped, uid);
         }
       },
       (err: any) => {
         console.warn('Cloud attendance sync note:', err?.message || err);
-      }
+      },
+      uid
     );
 
     return () => {
-      unsubAuth();
       unsubEmps();
       unsubAtt();
     };
-  }, []);
+  }, [currentUser]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 3200);
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOutFirebase();
+      showToast('Logged out successfully.');
+    } catch (e) {
+      console.error('Logout error:', e);
+    }
   };
 
   // Employees Map for quick name lookup
@@ -177,7 +205,7 @@ export default function App() {
       const parts = selectedMonth.split('-').map(Number);
       if (parts.length === 2) {
         const d = new Date(parts[0], parts[1] - 1, 1);
-        monthName = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+        monthName = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
       }
     }
 
@@ -202,10 +230,11 @@ export default function App() {
 
   const handleDeleteRecord = (id: string) => {
     if (window.confirm('Delete this attendance entry?')) {
+      const uid = currentUser?.uid;
       const updated = attendance.filter((r) => r.id !== id);
       setAttendance(updated);
-      saveAttendance(updated);
-      deleteAttendanceFromCloud(id).catch((err) => {
+      saveAttendance(updated, uid);
+      deleteAttendanceFromCloud(id, uid).catch((err) => {
         console.warn('Firebase sync delete note:', err);
       });
       showToast('Attendance record deleted.');
@@ -216,6 +245,7 @@ export default function App() {
     data: Omit<AttendanceRecord, 'id' | 'createdAt' | 'updatedAt'>,
     recordId?: string
   ) => {
+    const uid = currentUser?.uid;
     let updated: AttendanceRecord[];
     let savedRecord: AttendanceRecord;
 
@@ -225,6 +255,7 @@ export default function App() {
       savedRecord = {
         ...data,
         id: recordId,
+        userId: uid,
         createdAt: existing?.createdAt || Date.now(),
         updatedAt: Date.now(),
       };
@@ -242,6 +273,7 @@ export default function App() {
         savedRecord = {
           ...data,
           id: existing.id,
+          userId: uid,
           createdAt: existing.createdAt || Date.now(),
           updatedAt: Date.now(),
         };
@@ -252,6 +284,7 @@ export default function App() {
         savedRecord = {
           ...data,
           id: `att-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          userId: uid,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };
@@ -262,49 +295,53 @@ export default function App() {
 
     const cleanUpdated = deduplicateAttendance(updated);
     setAttendance(cleanUpdated);
-    saveAttendance(cleanUpdated);
+    saveAttendance(cleanUpdated, uid);
 
     // Sync with Firebase in background
-    syncAttendanceToCloud(savedRecord).catch((err) => {
+    syncAttendanceToCloud(savedRecord, uid).catch((err) => {
       console.warn('Firebase attendance save error:', err);
     });
   };
 
   // Handlers for Employee Management
   const handleAddEmployee = (empData: Omit<Employee, 'id' | 'createdAt'>) => {
+    const uid = currentUser?.uid;
     const newEmp: Employee = {
       ...empData,
       id: `emp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      userId: uid,
       createdAt: new Date().toISOString(),
     };
     const updated = [...employees, newEmp];
     setEmployees(updated);
-    saveEmployees(updated);
-    syncEmployeeToCloud(newEmp).catch((err) => {
+    saveEmployees(updated, uid);
+    syncEmployeeToCloud(newEmp, uid).catch((err) => {
       console.warn('Firebase employee sync error:', err);
     });
     showToast(`Added: ${newEmp.name}`);
   };
 
   const handleUpdateEmployee = (updatedEmp: Employee) => {
+    const uid = currentUser?.uid;
     const updated = employees.map((e) => (e.id === updatedEmp.id ? updatedEmp : e));
     setEmployees(updated);
-    saveEmployees(updated);
-    syncEmployeeToCloud(updatedEmp).catch((err) => {
+    saveEmployees(updated, uid);
+    syncEmployeeToCloud(updatedEmp, uid).catch((err) => {
       console.warn('Firebase employee sync error:', err);
     });
     showToast(`Updated: ${updatedEmp.name}`);
   };
 
   const handleDeleteEmployee = (id: string) => {
+    const uid = currentUser?.uid;
     const updatedEmps = employees.filter((e) => e.id !== id);
     const updatedAtt = attendance.filter((r) => r.employeeId !== id);
     setEmployees(updatedEmps);
-    saveEmployees(updatedEmps);
+    saveEmployees(updatedEmps, uid);
     setAttendance(updatedAtt);
-    saveAttendance(updatedAtt);
+    saveAttendance(updatedAtt, uid);
 
-    deleteEmployeeFromCloud(id).catch((err) => {
+    deleteEmployeeFromCloud(id, uid).catch((err) => {
       console.warn('Firebase delete employee error:', err);
     });
 
@@ -316,14 +353,15 @@ export default function App() {
 
   // Cloud Sync Handlers
   const handleForceSyncToCloud = async () => {
+    const uid = currentUser?.uid;
     setIsSyncing(true);
     setCloudSyncError(null);
     try {
       for (const emp of employees) {
-        await syncEmployeeToCloud(emp);
+        await syncEmployeeToCloud(emp, uid);
       }
       for (const rec of attendance) {
-        await syncAttendanceToCloud(rec);
+        await syncAttendanceToCloud(rec, uid);
       }
       showToast('All local records pushed to Firebase!');
     } catch (err: any) {
@@ -336,10 +374,12 @@ export default function App() {
   };
 
   const handlePullFromCloud = async () => {
+    const uid = currentUser?.uid;
     setIsSyncing(true);
     setCloudSyncError(null);
     try {
-      const empSnap = await getDocs(collection(db, 'employees'));
+      const empCol = uid ? collection(db, 'users', uid, 'employees') : collection(db, 'employees');
+      const empSnap = await getDocs(empCol);
       const cloudEmps: Employee[] = [];
       empSnap.forEach((d) => {
         const item = d.data() as Employee;
@@ -348,7 +388,8 @@ export default function App() {
         }
       });
 
-      const attSnap = await getDocs(collection(db, 'attendance'));
+      const attCol = uid ? collection(db, 'users', uid, 'attendance') : collection(db, 'attendance');
+      const attSnap = await getDocs(attCol);
       const cloudAtt: AttendanceRecord[] = [];
       attSnap.forEach((d) => {
         const item = d.data() as AttendanceRecord;
@@ -359,11 +400,12 @@ export default function App() {
 
       if (cloudEmps.length > 0) {
         setEmployees(cloudEmps);
-        saveEmployees(cloudEmps);
+        saveEmployees(cloudEmps, uid);
       }
       if (cloudAtt.length > 0) {
-        setAttendance(cloudAtt);
-        saveAttendance(cloudAtt);
+        const deduped = deduplicateAttendance(cloudAtt);
+        setAttendance(deduped);
+        saveAttendance(deduped, uid);
       }
       showToast(`Pulled ${cloudEmps.length} employees & ${cloudAtt.length} shifts from Firebase.`);
     } catch (err: any) {
@@ -391,6 +433,7 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const uid = currentUser?.uid;
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -401,12 +444,12 @@ export default function App() {
         const parsed = JSON.parse(content);
         if (parsed && Array.isArray(parsed.employees) && Array.isArray(parsed.attendance)) {
           setEmployees(parsed.employees);
-          saveEmployees(parsed.employees);
+          saveEmployees(parsed.employees, uid);
           setAttendance(parsed.attendance);
-          saveAttendance(parsed.attendance);
+          saveAttendance(parsed.attendance, uid);
           showToast(`Restored ${parsed.employees.length} employees & ${parsed.attendance.length} shifts.`);
-          parsed.employees.forEach((emp: Employee) => syncEmployeeToCloud(emp));
-          parsed.attendance.forEach((rec: AttendanceRecord) => syncAttendanceToCloud(rec));
+          parsed.employees.forEach((emp: Employee) => syncEmployeeToCloud(emp, uid));
+          parsed.attendance.forEach((rec: AttendanceRecord) => syncAttendanceToCloud(rec, uid));
         } else {
           alert('Invalid backup file.');
         }
@@ -420,17 +463,38 @@ export default function App() {
 
   const handleClearAllData = () => {
     if (window.confirm('Kya aap sachme saara employee aur attendance data delete karna chahte hain?')) {
+      const uid = currentUser?.uid;
       setEmployees([]);
-      saveEmployees([]);
+      saveEmployees([], uid);
       setAttendance([]);
-      saveAttendance([]);
+      saveAttendance([], uid);
       setSelectedEmployeeId('all');
       showToast('Saara data delete ho gaya.');
     }
   };
 
+  // Auth checking splash
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-slate-900 text-white font-bold text-sm flex items-center justify-center shadow-md animate-pulse">
+            ST
+          </div>
+          <div className="w-5 h-5 border-2 border-slate-300 border-t-slate-900 rounded-full animate-spin" />
+          <span className="text-xs text-slate-500 font-medium">Checking Login...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Not signed in -> Show Google Login Screen
+  if (!currentUser) {
+    return <LoginScreen />;
+  }
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans overflow-x-hidden w-full">
       {/* Hidden file input for JSON import */}
       <input
         type="file"
@@ -449,6 +513,8 @@ export default function App() {
         selectedMonth={selectedMonth}
         setSelectedMonth={setSelectedMonth}
         employees={employees}
+        currentUser={currentUser}
+        onSignOut={handleSignOut}
         onOpenNewRecord={handleOpenNewAttendance}
         onOpenRules={() => setIsRulesModalOpen(true)}
         onOpenFirebaseStatus={() => setIsFirebaseModalOpen(true)}
@@ -458,17 +524,17 @@ export default function App() {
 
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-xl shadow-lg border border-slate-700 text-xs font-medium flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+        <div className="fixed bottom-5 right-4 left-4 sm:left-auto sm:right-5 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-xl shadow-lg border border-slate-700 text-xs font-medium flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
           <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{toastMessage}</span>
         </div>
       )}
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
         {/* Onboarding State if no employees yet */}
         {employees.length === 0 ? (
-          <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-14 text-center max-w-md mx-auto my-8 shadow-xs space-y-4">
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-12 text-center max-w-md mx-auto my-6 sm:my-8 shadow-xs space-y-4">
             <div className="w-14 h-14 bg-slate-900 text-white rounded-2xl flex items-center justify-center mx-auto shadow-sm">
               <UserPlus className="w-7 h-7" />
             </div>
@@ -524,11 +590,11 @@ export default function App() {
               <div className="space-y-4">
                 <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 flex items-center justify-between shadow-xs">
                   <div>
-                    <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
-                      <Users className="w-5 h-5 text-slate-700" />
+                    <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
+                      <Users className="w-4 h-4 sm:w-5 sm:h-5 text-slate-700" />
                       <span>Employee List ({employees.length})</span>
                     </h2>
-                    <p className="text-xs text-slate-500 mt-0.5">
+                    <p className="text-[11px] sm:text-xs text-slate-500 mt-0.5">
                       Aapke dwara add kiye gaye sabhi workers ki list.
                     </p>
                   </div>
@@ -536,14 +602,14 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setIsEmployeeModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition shadow-2xs"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition shadow-2xs cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Add Employee</span>
+                    <span>Add Member</span>
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                   {employees.map((emp) => {
                     const empRecords = attendance.filter((r) => r.employeeId === emp.id);
                     const totalBasic = empRecords.reduce((acc, r) => acc + r.basicHours, 0);
@@ -552,7 +618,7 @@ export default function App() {
                     return (
                       <div
                         key={emp.id}
-                        className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between"
+                        className="bg-white border border-slate-200 rounded-xl p-3.5 sm:p-4 shadow-xs flex flex-col justify-between"
                       >
                         <div>
                           <div className="flex items-center gap-2.5 mb-3">
@@ -594,14 +660,14 @@ export default function App() {
                               setSelectedEmployeeId(emp.id);
                               setActiveTab('attendance');
                             }}
-                            className="text-xs font-semibold text-slate-700 hover:text-slate-900 hover:underline"
+                            className="text-xs font-semibold text-slate-700 hover:text-slate-900 hover:underline cursor-pointer"
                           >
                             View Shifts →
                           </button>
                           <button
                             type="button"
                             onClick={() => setIsEmployeeModalOpen(true)}
-                            className="text-xs text-slate-500 hover:text-slate-800"
+                            className="text-xs text-slate-500 hover:text-slate-800 cursor-pointer"
                           >
                             Edit
                           </button>
@@ -617,24 +683,24 @@ export default function App() {
       </main>
 
       {/* Footer & Data Storage Bar */}
-      <footer className="mt-auto border-t border-slate-200 bg-white py-3.5 px-4 sm:px-6">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-          <div className="flex items-center gap-2 flex-wrap">
+      <footer className="mt-auto border-t border-slate-200 bg-white py-3 px-3 sm:px-6">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+          <div className="flex items-center gap-2 flex-wrap justify-center sm:justify-start">
             <span className="font-semibold text-slate-800">ShiftTrack</span>
             <span>·</span>
             <button
               onClick={() => setIsFirebaseModalOpen(true)}
-              className="inline-flex items-center gap-1.5 font-medium text-amber-800 hover:text-amber-950 bg-amber-50 px-2 py-0.5 rounded border border-amber-200"
+              className="inline-flex items-center gap-1.5 font-medium text-amber-800 hover:text-amber-950 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 cursor-pointer"
             >
               <Database className="w-3 h-3 text-amber-600" />
-              <span>Firebase: shiva-shoes-store</span>
+              <span>Cloud Sync</span>
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
             </button>
             <span>·</span>
-            <span>{employees.length} employees · {attendance.length} records</span>
+            <span>{employees.length} employees · {attendance.length} shifts</span>
           </div>
 
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-3 flex-wrap justify-center sm:justify-end">
             <button
               type="button"
               onClick={handleExportJSON}
@@ -661,7 +727,7 @@ export default function App() {
                   className="hover:text-red-600 transition flex items-center gap-1 cursor-pointer text-slate-400"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>Clear All</span>
+                  <span>Clear</span>
                 </button>
               </>
             )}
