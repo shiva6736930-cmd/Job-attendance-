@@ -42,6 +42,7 @@ import {
   deleteAttendanceFromCloud,
   subscribeCloudEmployees,
   subscribeCloudAttendance,
+  fetchAllFromCloud,
   auth,
   signOutFirebase,
   db,
@@ -111,11 +112,35 @@ export default function App() {
 
     const uid = currentUser.uid;
 
-    // Load local storage for this specific user
+    // Load local storage for this specific user first
     const emps = loadEmployees(uid);
     setEmployees(emps);
     const recs = loadAttendance(uid);
     setAttendance(recs);
+
+    // Immediately pull from cloud across all paths (cross-browser sync)
+    fetchAllFromCloud(uid)
+      .then((cloudData) => {
+        if (cloudData.employees.length > 0) {
+          const mergedEmps = [...cloudData.employees];
+          // also merge any local ones
+          emps.forEach((localE) => {
+            if (!mergedEmps.some((me) => me.id === localE.id)) {
+              mergedEmps.push(localE);
+            }
+          });
+          setEmployees(mergedEmps);
+          saveEmployees(mergedEmps, uid);
+        }
+        if (cloudData.attendance.length > 0) {
+          const mergedAtt = deduplicateAttendance([...cloudData.attendance, ...recs]);
+          setAttendance(mergedAtt);
+          saveAttendance(mergedAtt, uid);
+        }
+      })
+      .catch((err) => {
+        console.warn('Initial cloud pull note:', err?.message || err);
+      });
 
     // Subscribe to cloud employees for this user
     const unsubEmps = subscribeCloudEmployees(
@@ -130,6 +155,9 @@ export default function App() {
       },
       (err: any) => {
         console.warn('Cloud employee sync note:', err?.message || err);
+        if (err?.message?.includes('Missing or insufficient permissions')) {
+          setCloudSyncError('Firestore rules locked in Firebase Console');
+        }
       },
       uid
     );
@@ -148,6 +176,9 @@ export default function App() {
       },
       (err: any) => {
         console.warn('Cloud attendance sync note:', err?.message || err);
+        if (err?.message?.includes('Missing or insufficient permissions')) {
+          setCloudSyncError('Firestore rules locked in Firebase Console');
+        }
       },
       uid
     );
@@ -297,10 +328,17 @@ export default function App() {
     setAttendance(cleanUpdated);
     saveAttendance(cleanUpdated, uid);
 
-    // Sync with Firebase in background
-    syncAttendanceToCloud(savedRecord, uid).catch((err) => {
-      console.warn('Firebase attendance save error:', err);
-    });
+    // Sync with Firebase in background with live feedback
+    syncAttendanceToCloud(savedRecord, uid)
+      .then(() => {
+        setCloudSyncError(null);
+        showToast('Shift saved & synced to Firebase ☁️');
+      })
+      .catch((err) => {
+        console.warn('Firebase attendance save error:', err);
+        setCloudSyncError(err?.message || 'Permission denied in Firebase Console');
+        showToast('⚠️ Local save hua, par Cloud sync fail (Firebase Rules locked)');
+      });
   };
 
   // Handlers for Employee Management
@@ -315,10 +353,16 @@ export default function App() {
     const updated = [...employees, newEmp];
     setEmployees(updated);
     saveEmployees(updated, uid);
-    syncEmployeeToCloud(newEmp, uid).catch((err) => {
-      console.warn('Firebase employee sync error:', err);
-    });
-    showToast(`Added: ${newEmp.name}`);
+    syncEmployeeToCloud(newEmp, uid)
+      .then(() => {
+        setCloudSyncError(null);
+        showToast(`Added & Synced: ${newEmp.name} ☁️`);
+      })
+      .catch((err) => {
+        console.warn('Firebase employee sync error:', err);
+        setCloudSyncError(err?.message || 'Permission denied in Firebase Console');
+        showToast(`⚠️ Added locally, par Cloud sync fail (Firebase Rules locked)`);
+      });
   };
 
   const handleUpdateEmployee = (updatedEmp: Employee) => {
@@ -326,10 +370,15 @@ export default function App() {
     const updated = employees.map((e) => (e.id === updatedEmp.id ? updatedEmp : e));
     setEmployees(updated);
     saveEmployees(updated, uid);
-    syncEmployeeToCloud(updatedEmp, uid).catch((err) => {
-      console.warn('Firebase employee sync error:', err);
-    });
-    showToast(`Updated: ${updatedEmp.name}`);
+    syncEmployeeToCloud(updatedEmp, uid)
+      .then(() => {
+        setCloudSyncError(null);
+        showToast(`Updated: ${updatedEmp.name} ☁️`);
+      })
+      .catch((err) => {
+        console.warn('Firebase employee sync error:', err);
+        setCloudSyncError(err?.message || 'Permission denied in Firebase Console');
+      });
   };
 
   const handleDeleteEmployee = (id: string) => {
@@ -532,6 +581,25 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-3 sm:py-6">
+        {/* Cloud Sync Warning Banner if Firebase rules are blocking cross-browser sync */}
+        {cloudSyncError && (
+          <div className="mb-4 p-3 bg-amber-50 border border-amber-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-amber-950 animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <Database className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>Firebase Cloud Sync Alert:</strong> Data dusre browser (Chrome/Brave) me sync nahi ho raha? Firebase Console me Firestore Rules allow karein.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsFirebaseModalOpen(true)}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg transition self-start sm:self-auto shrink-0 cursor-pointer text-xs shadow-2xs"
+            >
+              Fix Rules (1-Click Guide)
+            </button>
+          </div>
+        )}
+
         {/* Onboarding State if no employees yet */}
         {employees.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-12 text-center max-w-md mx-auto my-6 sm:my-8 shadow-xs space-y-4">
