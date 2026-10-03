@@ -36,6 +36,7 @@ import { FirebaseStatusModal } from './components/FirebaseStatusModal';
 import { LoginScreen } from './components/LoginScreen';
 import {
   testFirestoreConnection,
+  testWritePermission,
   syncEmployeeToCloud,
   deleteEmployeeFromCloud,
   syncAttendanceToCloud,
@@ -111,6 +112,15 @@ export default function App() {
     }
 
     const uid = currentUser.uid;
+
+    // Test if user can write to cloud
+    testWritePermission(uid).then((canWrite) => {
+      if (!canWrite) {
+        setCloudSyncError('Firebase Console me Firestore Rules locked hain. Cloud sync pause hai.');
+      } else {
+        setCloudSyncError(null);
+      }
+    });
 
     // Load local storage for this specific user first
     const emps = loadEmployees(uid);

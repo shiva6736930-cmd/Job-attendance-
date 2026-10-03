@@ -72,6 +72,18 @@ export interface FirestoreErrorInfo {
   };
 }
 
+/**
+ * Strips all undefined properties recursively so Firestore setDoc never throws:
+ * "Unsupported field value: undefined"
+ */
+export function cleanForFirestore<T>(data: T): T {
+  try {
+    return JSON.parse(JSON.stringify(data));
+  } catch (e) {
+    return data;
+  }
+}
+
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
@@ -118,14 +130,39 @@ export async function testFirestoreConnection(): Promise<{ connected: boolean; e
 }
 
 /**
- * Sync helpers for Employees collection (Dual Write to ensure persistence regardless of Firebase Console rules)
+ * Checks if the current authenticated user has active write permission to the cloud database
+ */
+export async function testWritePermission(uid: string): Promise<boolean> {
+  if (!uid) return false;
+  try {
+    await setDoc(doc(db, 'users', uid, 'profile', 'sync_test'), { time: Date.now() });
+    return true;
+  } catch (e1) {
+    try {
+      await setDoc(doc(db, 'employees', `test_${uid.slice(0, 5)}`), { time: Date.now() });
+      deleteDoc(doc(db, 'employees', `test_${uid.slice(0, 5)}`)).catch(() => {});
+      return true;
+    } catch (e2) {
+      try {
+        await set(ref(rtdb, `ping/${uid}`), { time: Date.now() });
+        return true;
+      } catch (e3) {
+        return false;
+      }
+    }
+  }
+}
+
+/**
+ * Sync helpers for Employees collection (Dual Write with clean payload)
  */
 export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promise<boolean> {
   const uid = userId || auth.currentUser?.uid;
   let succeeded = false;
   let lastError: any = null;
 
-  const payload = { ...emp, userId: uid };
+  // Crucial: Clean all undefined fields before sending to Firestore
+  const payload = cleanForFirestore({ ...emp, userId: uid });
 
   // 1. Try Firestore: users/{uid}/employees/{id}
   if (uid) {
@@ -138,7 +175,7 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
     }
   }
 
-  // 2. Try Firestore: employees/{id}
+  // 2. Try Firestore top-level: employees/{id}
   try {
     await setDoc(doc(db, 'employees', emp.id), payload);
     succeeded = true;
@@ -185,14 +222,15 @@ export async function deleteEmployeeFromCloud(id: string, userId?: string): Prom
 }
 
 /**
- * Sync helpers for Attendance records (Dual Write)
+ * Sync helpers for Attendance records (Dual Write with clean payload)
  */
 export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: string): Promise<boolean> {
   const uid = userId || auth.currentUser?.uid;
   let succeeded = false;
   let lastError: any = null;
 
-  const payload = { ...record, userId: uid };
+  // Crucial: Clean all undefined fields before sending to Firestore
+  const payload = cleanForFirestore({ ...record, userId: uid });
 
   // 1. Try Firestore: users/{uid}/attendance/{id}
   if (uid) {
@@ -264,7 +302,6 @@ export function subscribeCloudEmployees(
   const unsubs: (() => void)[] = [];
 
   const handleIncoming = (list: Employee[]) => {
-    // Filter by user if userId is set, or include legacy unassigned
     const filtered = list.filter((e) => !uid || !e.userId || e.userId === uid);
     if (filtered.length > 0) {
       onUpdate(filtered);

@@ -17,7 +17,6 @@ import {
   formatMinutes,
   getTodayString,
 } from '../utils/calculator';
-import { TimePickerInput } from './TimePickerInput';
 
 interface AttendanceFormModalProps {
   isOpen: boolean;
@@ -31,6 +30,35 @@ interface AttendanceFormModalProps {
   defaultEmployeeId?: string;
   onOpenAddEmployee?: () => void;
 }
+
+// 12h <-> 24h converters for simple, robust mobile time selection
+const parseTime24To12 = (time24: string) => {
+  if (!time24 || !time24.includes(':')) {
+    return { hour12: '09', minute: '00', period: 'AM' as 'AM' | 'PM' };
+  }
+  const [hStr, mStr] = time24.split(':');
+  let h = parseInt(hStr, 10);
+  if (isNaN(h)) h = 9;
+  const m = (mStr || '00').padStart(2, '0');
+  const period: 'AM' | 'PM' = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12;
+  if (h12 === 0) h12 = 12;
+  return {
+    hour12: String(h12).padStart(2, '0'),
+    minute: m,
+    period,
+  };
+};
+
+const format12To24 = (hour12: string, minute: string, period: 'AM' | 'PM') => {
+  let h = parseInt(hour12, 10);
+  if (period === 'PM' && h < 12) h += 12;
+  if (period === 'AM' && h === 12) h = 0;
+  return `${String(h).padStart(2, '0')}:${minute.padStart(2, '0')}`;
+};
+
+const HOURS_12 = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'];
+const MINUTES_LIST = ['00', '05', '10', '15', '20', '25', '30', '35', '40', '45', '50', '55'];
 
 export const AttendanceFormModal: React.FC<AttendanceFormModalProps> = ({
   isOpen,
@@ -103,6 +131,10 @@ export const AttendanceFormModal: React.FC<AttendanceFormModalProps> = ({
     // Regular: Daily base + extra OT hours
     estimatedShiftPay = dailyRate + calc.otHours * otRate;
   }
+
+  // Parse Time In and Time Out for clean mobile rendering
+  const timeIn12 = parseTime24To12(timeIn);
+  const timeOut12 = parseTime24To12(timeOut);
 
   // Quick preset shortcuts
   const applyPreset = (presetIn: string, presetOut: string) => {
@@ -265,7 +297,7 @@ export const AttendanceFormModal: React.FC<AttendanceFormModalProps> = ({
                   <Calendar className="w-3.5 h-3.5 text-slate-600" />
                   <span>Shift Date & Day (तारीख और दिन)</span>
                 </label>
-                <span className="text-[10px] text-slate-500">
+                <span className="text-[10px] text-slate-500 font-medium">
                   {date === todayStr ? 'Today' : 'Past Date'}
                 </span>
               </div>
@@ -387,62 +419,254 @@ export const AttendanceFormModal: React.FC<AttendanceFormModalProps> = ({
               </p>
             </div>
 
-            {/* Time In & Time Out Inputs (Clean Mobile Layout) */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2.5">
-              <span className="block text-xs font-bold text-slate-800">
-                Duty Timing (आने और जाने का समय)
-              </span>
-
-              <div className="grid grid-cols-2 gap-2.5">
-                <TimePickerInput
-                  id="modal-time-in"
-                  label="Time In (आने का समय)"
-                  value={timeIn}
-                  onChange={(newTime) => setTimeIn(newTime)}
-                  required
-                />
-                <TimePickerInput
-                  id="modal-time-out"
-                  label="Time Out (जाने का समय)"
-                  value={timeOut}
-                  onChange={(newTime) => setTimeOut(newTime)}
-                  required
-                />
+            {/* ========================================================= */}
+            {/* SUPER SIMPLE & CLEAN MOBILE-FRIENDLY DUTY TIMING SECTION */}
+            {/* ========================================================= */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <Clock className="w-4 h-4 text-slate-600" />
+                  <span>Duty Timing (आने और जाने का समय)</span>
+                </span>
+                <span className="text-xs font-mono font-bold text-slate-900 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                  {timeIn} – {timeOut}
+                </span>
               </div>
 
-              {/* Quick Shift Presets */}
+              {/* Box 1: Time In (आने का समय) - Full Width, No Squish */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2 shadow-2xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    Time In (आने का समय):
+                  </span>
+                  <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md">
+                    {timeIn12.hour12}:{timeIn12.minute} {timeIn12.period} ({timeIn})
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  {/* In Hour */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      घंटा (Hour)
+                    </label>
+                    <select
+                      value={timeIn12.hour12}
+                      onChange={(e) =>
+                        setTimeIn(format12To24(e.target.value, timeIn12.minute, timeIn12.period))
+                      }
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-300 rounded-xl p-2 text-center text-sm font-bold text-slate-900 font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
+                    >
+                      {HOURS_12.map((h) => (
+                        <option key={h} value={h}>
+                          {h}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* In Minute */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      मिनट (Min)
+                    </label>
+                    <select
+                      value={timeIn12.minute}
+                      onChange={(e) =>
+                        setTimeIn(format12To24(timeIn12.hour12, e.target.value, timeIn12.period))
+                      }
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-300 rounded-xl p-2 text-center text-sm font-bold text-slate-900 font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
+                    >
+                      {MINUTES_LIST.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* In AM/PM */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      AM / PM
+                    </label>
+                    <div className="grid grid-cols-2 gap-1 min-h-[44px]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTimeIn(format12To24(timeIn12.hour12, timeIn12.minute, 'AM'))
+                        }
+                        className={`rounded-xl text-xs font-bold transition flex items-center justify-center cursor-pointer ${
+                          timeIn12.period === 'AM'
+                            ? 'bg-slate-900 text-white shadow-2xs'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        AM
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTimeIn(format12To24(timeIn12.hour12, timeIn12.minute, 'PM'))
+                        }
+                        className={`rounded-xl text-xs font-bold transition flex items-center justify-center cursor-pointer ${
+                          timeIn12.period === 'PM'
+                            ? 'bg-slate-900 text-white shadow-2xs'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        PM
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Box 2: Time Out (जाने का समय) - Full Width, No Squish */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2 shadow-2xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    Time Out (जाने का समय):
+                  </span>
+                  <span className="text-xs font-mono font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md">
+                    {timeOut12.hour12}:{timeOut12.minute} {timeOut12.period} ({timeOut})
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  {/* Out Hour */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      घंटा (Hour)
+                    </label>
+                    <select
+                      value={timeOut12.hour12}
+                      onChange={(e) =>
+                        setTimeOut(format12To24(e.target.value, timeOut12.minute, timeOut12.period))
+                      }
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-300 rounded-xl p-2 text-center text-sm font-bold text-slate-900 font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
+                    >
+                      {HOURS_12.map((h) => (
+                        <option key={h} value={h}>
+                          {h}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Out Minute */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      मिनट (Min)
+                    </label>
+                    <select
+                      value={timeOut12.minute}
+                      onChange={(e) =>
+                        setTimeOut(format12To24(timeOut12.hour12, e.target.value, timeOut12.period))
+                      }
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-300 rounded-xl p-2 text-center text-sm font-bold text-slate-900 font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900 cursor-pointer"
+                    >
+                      {MINUTES_LIST.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Out AM/PM */}
+                  <div>
+                    <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1 text-center">
+                      AM / PM
+                    </label>
+                    <div className="grid grid-cols-2 gap-1 min-h-[44px]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTimeOut(format12To24(timeOut12.hour12, timeOut12.minute, 'AM'))
+                        }
+                        className={`rounded-xl text-xs font-bold transition flex items-center justify-center cursor-pointer ${
+                          timeOut12.period === 'AM'
+                            ? 'bg-slate-900 text-white shadow-2xs'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        AM
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setTimeOut(format12To24(timeOut12.hour12, timeOut12.minute, 'PM'))
+                        }
+                        className={`rounded-xl text-xs font-bold transition flex items-center justify-center cursor-pointer ${
+                          timeOut12.period === 'PM'
+                            ? 'bg-slate-900 text-white shadow-2xs'
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                        }`}
+                      >
+                        PM
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Quick Shift Presets - 1-Tap */}
               <div>
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                  Common Shifts (1-Click to set):
-                </label>
-                <div className="grid grid-cols-2 gap-1.5">
+                <span className="block text-[11px] font-semibold text-slate-600 mb-1.5">
+                  1-Click Shift Presets (सीधे 1 क्लिक में टाइम भरें):
+                </span>
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => applyPreset('09:00', '18:00')}
-                    className="py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold rounded-lg transition border border-slate-200 text-center"
+                    className={`min-h-[44px] py-2 px-2.5 rounded-xl border text-xs font-bold transition text-center cursor-pointer flex flex-col items-center justify-center ${
+                      timeIn === '09:00' && timeOut === '18:00'
+                        ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                        : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-200'
+                    }`}
                   >
-                    09:00 – 18:00 (9h Shift)
+                    <span>09:00 AM – 06:00 PM</span>
+                    <span className="text-[10px] opacity-75 font-normal">Standard 9h Shift</span>
                   </button>
+
                   <button
                     type="button"
                     onClick={() => applyPreset('08:00', '17:00')}
-                    className="py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold rounded-lg transition border border-slate-200 text-center"
+                    className={`min-h-[44px] py-2 px-2.5 rounded-xl border text-xs font-bold transition text-center cursor-pointer flex flex-col items-center justify-center ${
+                      timeIn === '08:00' && timeOut === '17:00'
+                        ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                        : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-200'
+                    }`}
                   >
-                    08:00 – 17:00 (9h Shift)
+                    <span>08:00 AM – 05:00 PM</span>
+                    <span className="text-[10px] opacity-75 font-normal">Early 9h Shift</span>
                   </button>
+
                   <button
                     type="button"
                     onClick={() => applyPreset('09:00', '20:00')}
-                    className="py-1.5 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-semibold rounded-lg transition border border-amber-200 text-center"
+                    className={`min-h-[44px] py-2 px-2.5 rounded-xl border text-xs font-bold transition text-center cursor-pointer flex flex-col items-center justify-center ${
+                      timeIn === '09:00' && timeOut === '20:00'
+                        ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                        : 'bg-amber-50/80 hover:bg-amber-100 text-amber-950 border-amber-300'
+                    }`}
                   >
-                    09:00 – 20:00 (+2h OT)
+                    <span>09:00 AM – 08:00 PM</span>
+                    <span className="text-[10px] font-semibold text-amber-800">+2h Overtime (OT)</span>
                   </button>
+
                   <button
                     type="button"
                     onClick={() => applyPreset('09:00', '21:00')}
-                    className="py-1.5 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-semibold rounded-lg transition border border-amber-200 text-center"
+                    className={`min-h-[44px] py-2 px-2.5 rounded-xl border text-xs font-bold transition text-center cursor-pointer flex flex-col items-center justify-center ${
+                      timeIn === '09:00' && timeOut === '21:00'
+                        ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                        : 'bg-amber-50/80 hover:bg-amber-100 text-amber-950 border-amber-300'
+                    }`}
                   >
-                    09:00 – 21:00 (+3h OT)
+                    <span>09:00 AM – 09:00 PM</span>
+                    <span className="text-[10px] font-semibold text-amber-800">+3h Overtime (OT)</span>
                   </button>
                 </div>
               </div>
