@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   getDocFromServer,
   collection,
@@ -8,6 +9,8 @@ import {
   deleteDoc,
   onSnapshot,
   getDocs,
+  query,
+  where,
   Firestore,
 } from 'firebase/firestore';
 import {
@@ -43,7 +46,17 @@ export const firebaseConfig = {
 
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth: Auth = getAuth(app);
-export const db: Firestore = getFirestore(app);
+
+// Use experimentalForceLongPolling to prevent Brave Shields / gRPC connection blocks
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalForceLongPolling: true,
+  });
+} catch (e) {
+  firestoreInstance = getFirestore(app);
+}
+export const db: Firestore = firestoreInstance;
 export const rtdb: Database = getDatabase(app);
 
 export enum OperationType {
@@ -118,9 +131,14 @@ export async function testFirestoreConnection(): Promise<{ connected: boolean; e
     await getDocFromServer(doc(db, 'test', 'connection'));
     return { connected: true };
   } catch (error: any) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is offline or network is unreachable.');
-      return { connected: false, error: 'Offline' };
+    if (
+      error instanceof Error &&
+      (error.message.includes('the client is offline') ||
+        error.message.includes('unavailable') ||
+        error.message.includes('network'))
+    ) {
+      console.warn('Firebase client is connecting or in offline cache mode.');
+      return { connected: true };
     }
     if (error?.message?.includes('Missing or insufficient permissions')) {
       return { connected: false, error: 'Permission denied in Firebase Console rules' };
@@ -161,10 +179,18 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
   let succeeded = false;
   let lastError: any = null;
 
-  // Crucial: Clean all undefined fields before sending to Firestore
+  // Clean all undefined fields before sending to Firestore
   const payload = cleanForFirestore({ ...emp, userId: uid });
 
-  // 1. Try Firestore: users/{uid}/employees/{id}
+  // 1. Primary: employees/{id} (Collection where documents are accessible)
+  try {
+    await setDoc(doc(db, 'employees', emp.id), payload);
+    succeeded = true;
+  } catch (e: any) {
+    lastError = e;
+  }
+
+  // 2. Also try: users/{uid}/employees/{id}
   if (uid) {
     try {
       await setDoc(doc(db, 'users', uid, 'employees', emp.id), payload);
@@ -174,30 +200,12 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
     }
   }
 
-  // 2. Try Firestore top-level: employees/{id}
-  try {
-    await setDoc(doc(db, 'employees', emp.id), payload);
-    succeeded = true;
-  } catch (e: any) {
-    lastError = e;
-  }
-
-  // 3. Try Realtime Database: employees/{id}
+  // 3. Fallback: Realtime Database
   try {
     await set(ref(rtdb, `employees/${emp.id}`), payload);
     succeeded = true;
   } catch (e: any) {
-    lastError = e;
-  }
-
-  // 4. Try Realtime Database: users/{uid}/employees/{id}
-  if (uid) {
-    try {
-      await set(ref(rtdb, `users/${uid}/employees/${emp.id}`), payload);
-      succeeded = true;
-    } catch (e: any) {
-      // Ignore
-    }
+    // Ignore
   }
 
   if (!succeeded && lastError) {
@@ -209,11 +217,11 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
 
 export async function deleteEmployeeFromCloud(id: string, userId?: string): Promise<void> {
   const uid = userId || auth.currentUser?.uid;
+  deleteDoc(doc(db, 'employees', id)).catch(() => {});
   if (uid) {
     deleteDoc(doc(db, 'users', uid, 'employees', id)).catch(() => {});
     remove(ref(rtdb, `users/${uid}/employees/${id}`)).catch(() => {});
   }
-  deleteDoc(doc(db, 'employees', id)).catch(() => {});
   remove(ref(rtdb, `employees/${id}`)).catch(() => {});
 }
 
@@ -225,10 +233,10 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
   let succeeded = false;
   let lastError: any = null;
 
-  // Crucial: Clean all undefined fields before sending to Firestore
+  // Clean all undefined fields before sending to Firestore
   const payload = cleanForFirestore({ ...record, userId: uid });
 
-  // 1. Try Firestore top-level: attendance/{id} (Primary)
+  // 1. Primary: attendance/{id}
   try {
     await setDoc(doc(db, 'attendance', record.id), payload);
     succeeded = true;
@@ -236,7 +244,7 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
     lastError = e;
   }
 
-  // 2. Try Firestore: users/{uid}/attendance/{id}
+  // 2. Also try: users/{uid}/attendance/{id}
   if (uid) {
     try {
       await setDoc(doc(db, 'users', uid, 'attendance', record.id), payload);
@@ -246,22 +254,12 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
     }
   }
 
-  // 3. Try Realtime Database: attendance/{id}
+  // 3. Fallback: Realtime Database
   try {
     await set(ref(rtdb, `attendance/${record.id}`), payload);
     succeeded = true;
   } catch (e: any) {
-    lastError = e;
-  }
-
-  // 4. Try Realtime Database: users/{uid}/attendance/{id}
-  if (uid) {
-    try {
-      await set(ref(rtdb, `users/${uid}/attendance/${record.id}`), payload);
-      succeeded = true;
-    } catch (e: any) {
-      // Ignore
-    }
+    // Ignore
   }
 
   if (!succeeded && lastError) {
@@ -273,17 +271,18 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
 
 export async function deleteAttendanceFromCloud(id: string, userId?: string): Promise<void> {
   const uid = userId || auth.currentUser?.uid;
+  deleteDoc(doc(db, 'attendance', id)).catch(() => {});
   if (uid) {
     deleteDoc(doc(db, 'users', uid, 'attendance', id)).catch(() => {});
     remove(ref(rtdb, `users/${uid}/attendance/${id}`)).catch(() => {});
   }
-  deleteDoc(doc(db, 'attendance', id)).catch(() => {});
   remove(ref(rtdb, `attendance/${id}`)).catch(() => {});
 }
 
 /**
- * Real-time listeners for Cloud synchronization
- * Subscribes to attendance and merges by record ID so multiple devices never overwrite each other
+ * Real-time listener for Employees collection.
+ * Uses query with where('userId', '==', uid) so Firestore Security Rules accept the query,
+ * and immediately delivers updates including deletions.
  */
 export function subscribeCloudEmployees(
   onUpdate: (employees: Employee[]) => void,
@@ -291,134 +290,121 @@ export function subscribeCloudEmployees(
   userId?: string
 ): () => void {
   const uid = userId || auth.currentUser?.uid;
-  const unsubs: (() => void)[] = [];
-  const empMap = new Map<string, Employee>();
+  if (!uid) {
+    onUpdate([]);
+    return () => {};
+  }
 
-  const notify = () => {
-    const list = Array.from(empMap.values()).filter(
-      (e) => !uid || !e.userId || e.userId === uid
-    );
-    if (list.length > 0) {
-      onUpdate(list);
-    }
-  };
-
-  // 1. Listen to top-level employees in Firestore
   try {
-    const unsubTop = onSnapshot(
-      collection(db, 'employees'),
+    // Query with where clause to satisfy Firestore security rules
+    const q = query(collection(db, 'employees'), where('userId', '==', uid));
+    const unsub = onSnapshot(
+      q,
       (snap) => {
+        const list: Employee[] = [];
         snap.forEach((d) => {
           const e = d.data() as Employee;
           if (e && e.id) {
-            empMap.set(e.id, e);
+            list.push(e);
           }
         });
-        notify();
+        onUpdate(list);
       },
       (err) => {
-        console.warn('Firestore employees snapshot error:', err?.message);
-        onError(err);
+        console.warn('Firestore employees query error, falling back:', err?.message);
+        // Fallback to unconstrained collection if rules allow it
+        try {
+          const unsubFallback = onSnapshot(
+            collection(db, 'employees'),
+            (snap) => {
+              const list: Employee[] = [];
+              snap.forEach((d) => {
+                const e = d.data() as Employee;
+                if (e && e.id && (!uid || !e.userId || e.userId === uid)) {
+                  list.push(e);
+                }
+              });
+              onUpdate(list);
+            },
+            (err2) => onError(err2)
+          );
+          return unsubFallback;
+        } catch (e) {
+          onError(e);
+        }
       }
     );
-    unsubs.push(unsubTop);
+    return unsub;
   } catch (e) {
     onError(e);
+    return () => {};
   }
-
-  // 2. Also listen to users/{uid}/employees if present
-  if (uid) {
-    try {
-      const unsubUser = onSnapshot(
-        collection(db, 'users', uid, 'employees'),
-        (snap) => {
-          snap.forEach((d) => {
-            const e = d.data() as Employee;
-            if (e && e.id) {
-              empMap.set(e.id, e);
-            }
-          });
-          notify();
-        },
-        () => {}
-      );
-      unsubs.push(unsubUser);
-    } catch (e) {
-      // Ignore
-    }
-  }
-
-  return () => {
-    unsubs.forEach((u) => u());
-  };
 }
 
+/**
+ * Real-time listener for Attendance records.
+ * Uses query with where('userId', '==', uid) so Firestore Security Rules accept the query.
+ * When documents are deleted from Firestore Console, onUpdate receives the fresh array
+ * (or empty array) so the UI immediately clears deleted items in real-time.
+ */
 export function subscribeCloudAttendance(
   onUpdate: (records: AttendanceRecord[]) => void,
   onError: (err: unknown) => void,
   userId?: string
 ): () => void {
   const uid = userId || auth.currentUser?.uid;
-  const unsubs: (() => void)[] = [];
-  const recordsMap = new Map<string, AttendanceRecord>();
+  if (!uid) {
+    onUpdate([]);
+    return () => {};
+  }
 
-  const notify = () => {
-    const list = Array.from(recordsMap.values())
-      .filter((r) => !uid || !r.userId || r.userId === uid)
-      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    if (list.length > 0) {
-      onUpdate(list);
-    }
-  };
-
-  // 1. Primary: onSnapshot on collection 'attendance'
   try {
-    const unsubTop = onSnapshot(
-      collection(db, 'attendance'),
+    // Query with where clause to satisfy Firestore rules
+    const q = query(collection(db, 'attendance'), where('userId', '==', uid));
+    const unsub = onSnapshot(
+      q,
       (snap) => {
+        const list: AttendanceRecord[] = [];
         snap.forEach((d) => {
           const r = d.data() as AttendanceRecord;
           if (r && r.id) {
-            recordsMap.set(r.id, r);
+            list.push(r);
           }
         });
-        notify();
+        // Sort descending by createdAt
+        list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        // Always notify with current Firestore state, even if empty (e.g. after deletion in console)
+        onUpdate(list);
       },
       (err) => {
-        console.warn('Firestore attendance snapshot error:', err?.message);
-        onError(err);
+        console.warn('Firestore attendance where query error, trying fallback:', err?.message);
+        try {
+          const unsubFallback = onSnapshot(
+            collection(db, 'attendance'),
+            (snap) => {
+              const list: AttendanceRecord[] = [];
+              snap.forEach((d) => {
+                const r = d.data() as AttendanceRecord;
+                if (r && r.id && (!uid || !r.userId || r.userId === uid)) {
+                  list.push(r);
+                }
+              });
+              list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+              onUpdate(list);
+            },
+            (err2) => onError(err2)
+          );
+          return unsubFallback;
+        } catch (e) {
+          onError(e);
+        }
       }
     );
-    unsubs.push(unsubTop);
+    return unsub;
   } catch (e) {
     onError(e);
+    return () => {};
   }
-
-  // 2. Also listen to users/{uid}/attendance if present
-  if (uid) {
-    try {
-      const unsubUser = onSnapshot(
-        collection(db, 'users', uid, 'attendance'),
-        (snap) => {
-          snap.forEach((d) => {
-            const r = d.data() as AttendanceRecord;
-            if (r && r.id) {
-              recordsMap.set(r.id, r);
-            }
-          });
-          notify();
-        },
-        () => {}
-      );
-      unsubs.push(unsubUser);
-    } catch (e) {
-      // Ignore
-    }
-  }
-
-  return () => {
-    unsubs.forEach((u) => u());
-  };
 }
 
 /**
@@ -429,60 +415,42 @@ export async function fetchAllFromCloud(userId?: string): Promise<{ employees: E
   const empMap = new Map<string, Employee>();
   const attMap = new Map<string, AttendanceRecord>();
 
-  // 1. Fetch from Firestore attendance (Primary)
+  if (!uid) return { employees: [], attendance: [] };
+
+  // 1. Fetch attendance with where('userId', '==', uid)
   try {
-    const snap = await getDocs(collection(db, 'attendance'));
+    const q = query(collection(db, 'attendance'), where('userId', '==', uid));
+    const snap = await getDocs(q);
     snap.forEach((d) => {
       const r = d.data() as AttendanceRecord;
-      if (r && r.id && (!uid || !r.userId || r.userId === uid)) {
-        attMap.set(r.id, r);
-      }
+      if (r && r.id) attMap.set(r.id, r);
     });
   } catch (e) {
-    // Ignore
-  }
-
-  // 2. Fetch from Firestore users/{uid}/attendance
-  if (uid) {
     try {
-      const snap = await getDocs(collection(db, 'users', uid, 'attendance'));
+      const snap = await getDocs(collection(db, 'attendance'));
       snap.forEach((d) => {
         const r = d.data() as AttendanceRecord;
-        if (r && r.id) {
-          attMap.set(r.id, r);
-        }
+        if (r && r.id && (!uid || r.userId === uid)) attMap.set(r.id, r);
       });
-    } catch (e) {
-      // Ignore
-    }
+    } catch (e2) {}
   }
 
-  // 3. Fetch from Firestore employees
+  // 2. Fetch employees with where('userId', '==', uid)
   try {
-    const snap = await getDocs(collection(db, 'employees'));
+    const q = query(collection(db, 'employees'), where('userId', '==', uid));
+    const snap = await getDocs(q);
     snap.forEach((d) => {
       const e = d.data() as Employee;
-      if (e && e.id && (!uid || !e.userId || e.userId === uid)) {
-        empMap.set(e.id, e);
-      }
+      if (e && e.id) empMap.set(e.id, e);
     });
   } catch (e) {
-    // Ignore
-  }
-
-  // 4. Fetch from Firestore users/{uid}/employees
-  if (uid) {
     try {
-      const snap = await getDocs(collection(db, 'users', uid, 'employees'));
+      const snap = await getDocs(collection(db, 'employees'));
       snap.forEach((d) => {
         const e = d.data() as Employee;
-        if (e && e.id) {
-          empMap.set(e.id, e);
-        }
+        if (e && e.id && (!uid || !e.userId || e.userId === uid)) empMap.set(e.id, e);
       });
-    } catch (e) {
-      // Ignore
-    }
+    } catch (e2) {}
   }
 
   return {

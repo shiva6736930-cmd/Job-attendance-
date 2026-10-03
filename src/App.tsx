@@ -122,49 +122,25 @@ export default function App() {
       }
     });
 
-    // Load local storage for this specific user first
-    const emps = loadEmployees(uid);
-    setEmployees(emps);
-    const recs = loadAttendance(uid);
-    setAttendance(recs);
+    // 1. Load local cache for instant initial render
+    const cachedEmps = loadEmployees(uid);
+    setEmployees(cachedEmps);
+    const cachedRecs = loadAttendance(uid);
+    setAttendance(cachedRecs);
 
-    // Immediately pull from cloud across all paths (cross-browser sync)
-    fetchAllFromCloud(uid)
-      .then((cloudData) => {
-        if (cloudData.employees.length > 0) {
-          const mergedEmps = [...cloudData.employees];
-          // also merge any local ones
-          emps.forEach((localE) => {
-            if (!mergedEmps.some((me) => me.id === localE.id)) {
-              mergedEmps.push(localE);
-            }
-          });
-          setEmployees(mergedEmps);
-          saveEmployees(mergedEmps, uid);
-        }
-        if (cloudData.attendance.length > 0) {
-          const mergedAtt = deduplicateAttendance([...cloudData.attendance, ...recs]);
-          setAttendance(mergedAtt);
-          saveAttendance(mergedAtt, uid);
-        }
-      })
-      .catch((err) => {
-        console.warn('Initial cloud pull note:', err?.message || err);
-      });
-
-    // Subscribe to cloud employees for this user
-    const unsubEmps = subscribeCloudEmployees(
-      (cloudEmps) => {
-        const clean = (cloudEmps || []).filter(
-          (e) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(e.id)
+    // 2. Live cloud attendance subscription (Cloud is the authoritative source of truth)
+    const unsubAtt = subscribeCloudAttendance(
+      (cloudAtt) => {
+        const clean = (cloudAtt || []).filter(
+          (r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId)
         );
-        if (clean.length > 0) {
-          setEmployees(clean);
-          saveEmployees(clean, uid);
-        }
+        const deduped = deduplicateAttendance(clean);
+        // Always update state and localStorage with current cloud records, even if empty (after deletion)
+        setAttendance(deduped);
+        saveAttendance(deduped, uid);
       },
       (err: any) => {
-        console.warn('Cloud employee sync note:', err?.message || err);
+        console.warn('Cloud attendance sync note:', err?.message || err);
         if (err?.message?.includes('Missing or insufficient permissions')) {
           setCloudSyncError('Firestore rules locked in Firebase Console');
         }
@@ -172,20 +148,17 @@ export default function App() {
       uid
     );
 
-    // Subscribe to cloud attendance for this user
-    const unsubAtt = subscribeCloudAttendance(
-      (cloudAtt) => {
-        const clean = (cloudAtt || []).filter(
-          (r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId)
+    // 3. Live cloud employees subscription (Cloud is the authoritative source of truth)
+    const unsubEmps = subscribeCloudEmployees(
+      (cloudEmps) => {
+        const clean = (cloudEmps || []).filter(
+          (e) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(e.id)
         );
-        if (clean.length > 0) {
-          const deduped = deduplicateAttendance(clean);
-          setAttendance(deduped);
-          saveAttendance(deduped, uid);
-        }
+        setEmployees(clean);
+        saveEmployees(clean, uid);
       },
       (err: any) => {
-        console.warn('Cloud attendance sync note:', err?.message || err);
+        console.warn('Cloud employee sync note:', err?.message || err);
         if (err?.message?.includes('Missing or insufficient permissions')) {
           setCloudSyncError('Firestore rules locked in Firebase Console');
         }
