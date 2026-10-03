@@ -54,13 +54,14 @@ export function saveEmployees(employees: Employee[], userId?: string): void {
 export function deduplicateAttendance(records: AttendanceRecord[]): AttendanceRecord[] {
   const map = new Map<string, AttendanceRecord>();
   records.forEach((r) => {
-    const key = `${r.employeeId}-${r.date}`;
+    // Deduplicate by record.id so distinct shifts logged across devices are never dropped
+    const key = r.id;
     const existing = map.get(key);
     if (!existing || (r.updatedAt || r.createdAt) >= (existing.updatedAt || existing.createdAt)) {
       map.set(key, r);
     }
   });
-  return Array.from(map.values());
+  return Array.from(map.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 
 export function loadAttendance(userId?: string): AttendanceRecord[] {

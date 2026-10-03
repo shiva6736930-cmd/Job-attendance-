@@ -171,7 +171,6 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
       succeeded = true;
     } catch (e: any) {
       lastError = e;
-      console.warn('Firestore user subcollection write failed, trying top-level:', e?.message);
     }
   }
 
@@ -181,7 +180,6 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
     succeeded = true;
   } catch (e: any) {
     lastError = e;
-    console.warn('Firestore top-level employees write failed:', e?.message);
   }
 
   // 3. Try Realtime Database: employees/{id}
@@ -190,7 +188,6 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
     succeeded = true;
   } catch (e: any) {
     lastError = e;
-    console.warn('RTDB employees write failed:', e?.message);
   }
 
   // 4. Try Realtime Database: users/{uid}/employees/{id}
@@ -199,12 +196,11 @@ export async function syncEmployeeToCloud(emp: Employee, userId?: string): Promi
       await set(ref(rtdb, `users/${uid}/employees/${emp.id}`), payload);
       succeeded = true;
     } catch (e: any) {
-      console.warn('RTDB user subcollection write failed:', e?.message);
+      // Ignore
     }
   }
 
   if (!succeeded && lastError) {
-    console.error('All cloud destinations failed for employee:', emp.name, lastError);
     throw lastError;
   }
 
@@ -232,24 +228,22 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
   // Crucial: Clean all undefined fields before sending to Firestore
   const payload = cleanForFirestore({ ...record, userId: uid });
 
-  // 1. Try Firestore: users/{uid}/attendance/{id}
+  // 1. Try Firestore top-level: attendance/{id} (Primary)
+  try {
+    await setDoc(doc(db, 'attendance', record.id), payload);
+    succeeded = true;
+  } catch (e: any) {
+    lastError = e;
+  }
+
+  // 2. Try Firestore: users/{uid}/attendance/{id}
   if (uid) {
     try {
       await setDoc(doc(db, 'users', uid, 'attendance', record.id), payload);
       succeeded = true;
     } catch (e: any) {
       lastError = e;
-      console.warn('Firestore user attendance write failed, trying top-level:', e?.message);
     }
-  }
-
-  // 2. Try Firestore: attendance/{id}
-  try {
-    await setDoc(doc(db, 'attendance', record.id), payload);
-    succeeded = true;
-  } catch (e: any) {
-    lastError = e;
-    console.warn('Firestore top-level attendance write failed:', e?.message);
   }
 
   // 3. Try Realtime Database: attendance/{id}
@@ -258,7 +252,6 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
     succeeded = true;
   } catch (e: any) {
     lastError = e;
-    console.warn('RTDB attendance write failed:', e?.message);
   }
 
   // 4. Try Realtime Database: users/{uid}/attendance/{id}
@@ -267,12 +260,11 @@ export async function syncAttendanceToCloud(record: AttendanceRecord, userId?: s
       await set(ref(rtdb, `users/${uid}/attendance/${record.id}`), payload);
       succeeded = true;
     } catch (e: any) {
-      console.warn('RTDB user attendance write failed:', e?.message);
+      // Ignore
     }
   }
 
   if (!succeeded && lastError) {
-    console.error('All cloud destinations failed for attendance:', record.id, lastError);
     throw lastError;
   }
 
@@ -291,7 +283,7 @@ export async function deleteAttendanceFromCloud(id: string, userId?: string): Pr
 
 /**
  * Real-time listeners for Cloud synchronization
- * Subscribes to multiple cloud paths and merges them seamlessly
+ * Subscribes to attendance and merges by record ID so multiple devices never overwrite each other
  */
 export function subscribeCloudEmployees(
   onUpdate: (employees: Employee[]) => void,
@@ -300,11 +292,14 @@ export function subscribeCloudEmployees(
 ): () => void {
   const uid = userId || auth.currentUser?.uid;
   const unsubs: (() => void)[] = [];
+  const empMap = new Map<string, Employee>();
 
-  const handleIncoming = (list: Employee[]) => {
-    const filtered = list.filter((e) => !uid || !e.userId || e.userId === uid);
-    if (filtered.length > 0) {
-      onUpdate(filtered);
+  const notify = () => {
+    const list = Array.from(empMap.values()).filter(
+      (e) => !uid || !e.userId || e.userId === uid
+    );
+    if (list.length > 0) {
+      onUpdate(list);
     }
   };
 
@@ -313,9 +308,13 @@ export function subscribeCloudEmployees(
     const unsubTop = onSnapshot(
       collection(db, 'employees'),
       (snap) => {
-        const list: Employee[] = [];
-        snap.forEach((d) => list.push(d.data() as Employee));
-        handleIncoming(list);
+        snap.forEach((d) => {
+          const e = d.data() as Employee;
+          if (e && e.id) {
+            empMap.set(e.id, e);
+          }
+        });
+        notify();
       },
       (err) => {
         console.warn('Firestore employees snapshot error:', err?.message);
@@ -327,43 +326,26 @@ export function subscribeCloudEmployees(
     onError(e);
   }
 
-  // 2. If user is logged in, also listen to users/{uid}/employees
+  // 2. Also listen to users/{uid}/employees if present
   if (uid) {
     try {
       const unsubUser = onSnapshot(
         collection(db, 'users', uid, 'employees'),
         (snap) => {
-          const list: Employee[] = [];
-          snap.forEach((d) => list.push(d.data() as Employee));
-          handleIncoming(list);
+          snap.forEach((d) => {
+            const e = d.data() as Employee;
+            if (e && e.id) {
+              empMap.set(e.id, e);
+            }
+          });
+          notify();
         },
-        (err) => {
-          console.warn('Firestore user employees snapshot error:', err?.message);
-        }
+        () => {}
       );
       unsubs.push(unsubUser);
     } catch (e) {
       // Ignore
     }
-  }
-
-  // 3. Fallback: Listen to Realtime Database employees
-  try {
-    const rtdbRef = ref(rtdb, 'employees');
-    onValue(
-      rtdbRef,
-      (snap) => {
-        const val = snap.val();
-        if (val && typeof val === 'object') {
-          handleIncoming(Object.values(val));
-        }
-      },
-      (err) => {
-        console.warn('RTDB employees snapshot error:', err?.message);
-      }
-    );
-  } catch (e) {
-    // Ignore
   }
 
   return () => {
@@ -378,22 +360,29 @@ export function subscribeCloudAttendance(
 ): () => void {
   const uid = userId || auth.currentUser?.uid;
   const unsubs: (() => void)[] = [];
+  const recordsMap = new Map<string, AttendanceRecord>();
 
-  const handleIncoming = (list: AttendanceRecord[]) => {
-    const filtered = list.filter((r) => !uid || !r.userId || r.userId === uid);
-    if (filtered.length > 0) {
-      onUpdate(filtered);
+  const notify = () => {
+    const list = Array.from(recordsMap.values())
+      .filter((r) => !uid || !r.userId || r.userId === uid)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    if (list.length > 0) {
+      onUpdate(list);
     }
   };
 
-  // 1. Listen to top-level attendance in Firestore
+  // 1. Primary: onSnapshot on collection 'attendance'
   try {
     const unsubTop = onSnapshot(
       collection(db, 'attendance'),
       (snap) => {
-        const list: AttendanceRecord[] = [];
-        snap.forEach((d) => list.push(d.data() as AttendanceRecord));
-        handleIncoming(list);
+        snap.forEach((d) => {
+          const r = d.data() as AttendanceRecord;
+          if (r && r.id) {
+            recordsMap.set(r.id, r);
+          }
+        });
+        notify();
       },
       (err) => {
         console.warn('Firestore attendance snapshot error:', err?.message);
@@ -405,43 +394,26 @@ export function subscribeCloudAttendance(
     onError(e);
   }
 
-  // 2. If user is logged in, also listen to users/{uid}/attendance
+  // 2. Also listen to users/{uid}/attendance if present
   if (uid) {
     try {
       const unsubUser = onSnapshot(
         collection(db, 'users', uid, 'attendance'),
         (snap) => {
-          const list: AttendanceRecord[] = [];
-          snap.forEach((d) => list.push(d.data() as AttendanceRecord));
-          handleIncoming(list);
+          snap.forEach((d) => {
+            const r = d.data() as AttendanceRecord;
+            if (r && r.id) {
+              recordsMap.set(r.id, r);
+            }
+          });
+          notify();
         },
-        (err) => {
-          console.warn('Firestore user attendance snapshot error:', err?.message);
-        }
+        () => {}
       );
       unsubs.push(unsubUser);
     } catch (e) {
       // Ignore
     }
-  }
-
-  // 3. Fallback: Listen to Realtime Database attendance
-  try {
-    const rtdbRef = ref(rtdb, 'attendance');
-    onValue(
-      rtdbRef,
-      (snap) => {
-        const val = snap.val();
-        if (val && typeof val === 'object') {
-          handleIncoming(Object.values(val));
-        }
-      },
-      (err) => {
-        console.warn('RTDB attendance snapshot error:', err?.message);
-      }
-    );
-  } catch (e) {
-    // Ignore
   }
 
   return () => {
@@ -457,86 +429,60 @@ export async function fetchAllFromCloud(userId?: string): Promise<{ employees: E
   const empMap = new Map<string, Employee>();
   const attMap = new Map<string, AttendanceRecord>();
 
-  // 1. Fetch from Firestore users/{uid}/employees
-  if (uid) {
-    try {
-      const snap = await getDocs(collection(db, 'users', uid, 'employees'));
-      snap.forEach((d) => {
-        const e = d.data() as Employee;
-        empMap.set(e.id, e);
-      });
-    } catch (e) {
-      // Ignore
-    }
-  }
-
-  // 2. Fetch from Firestore employees
+  // 1. Fetch from Firestore attendance (Primary)
   try {
-    const snap = await getDocs(collection(db, 'employees'));
+    const snap = await getDocs(collection(db, 'attendance'));
     snap.forEach((d) => {
-      const e = d.data() as Employee;
-      if (!uid || !e.userId || e.userId === uid) {
-        empMap.set(e.id, e);
+      const r = d.data() as AttendanceRecord;
+      if (r && r.id && (!uid || !r.userId || r.userId === uid)) {
+        attMap.set(r.id, r);
       }
     });
   } catch (e) {
     // Ignore
   }
 
-  // 3. Fetch from RTDB employees
-  try {
-    const rsnap = await get(ref(rtdb, 'employees'));
-    const val = rsnap.val();
-    if (val && typeof val === 'object') {
-      Object.values(val).forEach((item: any) => {
-        if (item && item.id && (!uid || !item.userId || item.userId === uid)) {
-          empMap.set(item.id, item as Employee);
-        }
-      });
-    }
-  } catch (e) {
-    // Ignore
-  }
-
-  // 4. Fetch from Firestore users/{uid}/attendance
+  // 2. Fetch from Firestore users/{uid}/attendance
   if (uid) {
     try {
       const snap = await getDocs(collection(db, 'users', uid, 'attendance'));
       snap.forEach((d) => {
         const r = d.data() as AttendanceRecord;
-        attMap.set(r.id, r);
+        if (r && r.id) {
+          attMap.set(r.id, r);
+        }
       });
     } catch (e) {
       // Ignore
     }
   }
 
-  // 5. Fetch from Firestore attendance
+  // 3. Fetch from Firestore employees
   try {
-    const snap = await getDocs(collection(db, 'attendance'));
+    const snap = await getDocs(collection(db, 'employees'));
     snap.forEach((d) => {
-      const r = d.data() as AttendanceRecord;
-      if (!uid || !r.userId || r.userId === uid) {
-        attMap.set(r.id, r);
+      const e = d.data() as Employee;
+      if (e && e.id && (!uid || !e.userId || e.userId === uid)) {
+        empMap.set(e.id, e);
       }
     });
   } catch (e) {
     // Ignore
   }
 
-  // 6. Fetch from RTDB attendance
-  try {
-    const rsnap = await get(ref(rtdb, 'attendance'));
-    const val = rsnap.val();
-    if (val && typeof val === 'object') {
-      Object.values(val).forEach((item: any) => {
-        if (item && item.id && (!uid || !item.userId || item.userId === uid)) {
-          attMap.set(item.id, item as AttendanceRecord);
+  // 4. Fetch from Firestore users/{uid}/employees
+  if (uid) {
+    try {
+      const snap = await getDocs(collection(db, 'users', uid, 'employees'));
+      snap.forEach((d) => {
+        const e = d.data() as Employee;
+        if (e && e.id) {
+          empMap.set(e.id, e);
         }
       });
+    } catch (e) {
+      // Ignore
     }
-  } catch (e) {
-    // Ignore
   }
 
   return {
