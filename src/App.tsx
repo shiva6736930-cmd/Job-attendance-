@@ -410,36 +410,25 @@ export default function App() {
     setIsSyncing(true);
     setCloudSyncError(null);
     try {
-      const empCol = uid ? collection(db, 'users', uid, 'employees') : collection(db, 'employees');
-      const empSnap = await getDocs(empCol);
-      const cloudEmps: Employee[] = [];
-      empSnap.forEach((d) => {
-        const item = d.data() as Employee;
-        if (!['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(item.id)) {
-          cloudEmps.push(item);
-        }
-      });
+      const cloudData = await fetchAllFromCloud(uid);
+      const cleanEmps = (cloudData.employees || []).filter(
+        (e) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(e.id)
+      );
+      const cleanAtt = (cloudData.attendance || []).filter(
+        (r) => !['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(r.employeeId)
+      );
 
-      const attCol = uid ? collection(db, 'users', uid, 'attendance') : collection(db, 'attendance');
-      const attSnap = await getDocs(attCol);
-      const cloudAtt: AttendanceRecord[] = [];
-      attSnap.forEach((d) => {
-        const item = d.data() as AttendanceRecord;
-        if (!['emp-shiva', 'emp-rajesh', 'emp-amit'].includes(item.employeeId)) {
-          cloudAtt.push(item);
-        }
-      });
-
-      if (cloudEmps.length > 0) {
-        setEmployees(cloudEmps);
-        saveEmployees(cloudEmps, uid);
+      // Save to both Chrome memory and application state
+      if (cleanEmps.length > 0) {
+        setEmployees(cleanEmps);
+        saveEmployees(cleanEmps, uid);
       }
-      if (cloudAtt.length > 0) {
-        const deduped = deduplicateAttendance(cloudAtt);
+      if (cleanAtt.length > 0) {
+        const deduped = deduplicateAttendance(cleanAtt);
         setAttendance(deduped);
         saveAttendance(deduped, uid);
       }
-      showToast(`Pulled ${cloudEmps.length} employees & ${cloudAtt.length} shifts from Firebase.`);
+      showToast(`Sync complete: ${cleanEmps.length} employees & ${cleanAtt.length} shifts from Cloud ☁️`);
     } catch (err: any) {
       console.error('Pull from cloud error:', err);
       setCloudSyncError(err?.message || 'Check Firestore rules');
