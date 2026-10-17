@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#0f172a"/>
+  <!-- Clipboard Body -->
+  <rect x="116" y="110" width="280" height="330" rx="36" fill="#1e293b" stroke="#334155" stroke-width="12"/>
+  <rect x="144" y="150" width="224" height="260" rx="20" fill="#f8fafc"/>
+  
+  <!-- Clipboard Clip Top -->
+  <rect x="196" y="80" width="120" height="54" rx="16" fill="#475569" stroke="#64748b" stroke-width="8"/>
+  <circle cx="256" cy="98" r="10" fill="#0f172a"/>
+
+  <!-- Lines on sheet -->
+  <line x1="174" y1="200" x2="250" y2="200" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+  <line x1="174" y1="240" x2="230" y2="240" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+  <line x1="174" y1="280" x2="240" y2="280" stroke="#cbd5e1" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- Clock -->
+  <circle cx="330" cy="240" r="68" fill="#ffffff" stroke="#0f172a" stroke-width="12"/>
+  <circle cx="330" cy="240" r="4" fill="#0f172a"/>
+  <polyline points="330,202 330,240 356,240" stroke="#0f172a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Green Check Badge -->
+  <circle cx="340" cy="350" r="46" fill="#10b981" stroke="#ffffff" stroke-width="10"/>
+  <polyline points="320,350 334,364 362,336" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

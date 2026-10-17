@@ -33,6 +33,7 @@ import { EmployeeManagerModal } from './components/EmployeeManagerModal';
 import { MonthlyReportView } from './components/MonthlyReportView';
 import { RulesInfoModal } from './components/RulesInfoModal';
 import { FirebaseStatusModal } from './components/FirebaseStatusModal';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { LoginScreen } from './components/LoginScreen';
 import {
   testFirestoreConnection,
@@ -817,6 +818,9 @@ export default function App() {
         onForceSyncToCloud={handleForceSyncToCloud}
         onPullFromCloud={handlePullFromCloud}
       />
+
+      {/* Connectivity & Offline Mode Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }
